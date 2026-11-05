@@ -1,0 +1,23 @@
+services:
+  repo:
+    build: .
+    container_name: rhel-stig-lab-repo
+    restart: unless-stopped
+    ports:
+      - "192.168.150.1:8089:8088"
+    volumes:
+      - /scratch/iso/repo:/srv/repo:ro
+      - ./data/menu-ks:/srv/ks:ro
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8088/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

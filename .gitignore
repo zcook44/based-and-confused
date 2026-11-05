@@ -1,0 +1,11 @@
+# Operator secrets and generated credential-bearing Kickstarts
+lab-vms.env
+*.env.local
+data/menu-ks/*.ks
+
+# Runtime/build artifacts
+__pycache__/
+*.py[cod]
+*.iso
+*.qcow2
+*.partial
