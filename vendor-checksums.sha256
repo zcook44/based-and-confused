@@ -1,0 +1,6 @@
+# Red Hat x86_64 DVD ISO SHA-256 values from official download pages:
+# https://developers.redhat.com/products/rhel/8
+# https://developers.redhat.com/products/rhel/download
+9b3c8e31bc2cdd2de9cf96abb3726347f5840ff3b176270647b3e66639af291b  rhel-8.10-x86_64-dvd.iso
+c0dd53b73406b85b40d6168d1748e605d71361b2992d282c408b7d7d2e1d2c80  rhel-9.8-x86_64-dvd.iso
+e15cb333529c332e76e4b1b946efe3515c99f996546675aec18e8effdf2540a5  rhel-10.2-x86_64-dvd.iso

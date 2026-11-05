@@ -2,6 +2,8 @@
 
 Eight disposable VMs on one libvirt network, built from the RHEL 8.10, 9.8, and 10.2 DVDs. Use them to develop Ansible automation against a STIG-oriented starting point. Nothing in this repo creates a VM until you run `./lab-vms.sh up ...` or create one in virt-manager.
 
+**New machine?** Start with the [fresh-clone quickstart](QUICKSTART.md). Its `setup-lab.sh` runs separate `check`, `prepare`, `build-iso`, and `verify` phases; the guide has official DVD links and the first-VM walkthrough.
+
 ## Pick an install path
 
 - **Want to watch the installer in virt-manager?** Boot the [menu ISO](#install-in-virt-manager). Pick the OS/role and optionally change its IP and hostname at the boot menu. The ISO has a fixed `labadmin` account; the Bash env file does not change it.
@@ -88,24 +90,29 @@ The two extracted installation trees live at `/scratch/iso/repo/rhel8` and `/scr
 - RHEL 10.2 has no Anaconda OpenSCAP addon. Its Kickstart attempts remediation after package installation with the DVD-matched `stig` or `stig_gui` profile and retains its report/results under `/root`. The bundled profile is titled "Red Hat STIG with GUI," **not proof** of alignment with an official DISA RHEL 10 revision.
 - FIPS is requested at installer boot and in the installed bootloader. Check the installed guest's FIPS state, SSH access, disk layout, and any remaining manual or failed findings before calling it compliant. A password set for root does not imply root SSH login is permitted.
 
-The eight Kickstarts passed `ksvalidator`; the repository trees answered HTTP requests; all 30 unit tests passed; the menu booted under BIOS and UEFI; and the eight `virt-install` configurations passed dry runs. **No guest was installed from this ISO in these checks.** Your installation walkthrough is the end-to-end test. No persistent VMs were created for validation.
+The eight Kickstarts passed `ksvalidator`; the repository trees answered HTTP requests; all 41 unit tests passed; the menu booted under BIOS and UEFI; and the eight `virt-install` configurations passed dry runs. **No guest was installed from this ISO in these checks.** Your installation walkthrough is the end-to-end test. No persistent VMs were created for validation.
 
-## Rebuild the menu ISO
+## Build the Kickstart menu ISO on another admin workstation
 
-Only rebuild when you change the media, SSH key, or templates. Choose a **new output filename**; the builder refuses to overwrite an existing ISO. The original Red Hat DVDs remain untouched.
+The **build script is in this repo; the licensed vendor DVDs and private credentials are not**. Obtain the official full RHEL 8.10, 9.8, and 10.2 x86_64 DVDs through your organization's Red Hat entitlement. Install Python 3, OpenSSL, and `xorriso` locally. Leave enough free space for the source media, another ~12 GiB output ISO, and temporary files. The script works offline and creates no VMs. It requires a new output filename and never modifies a vendor DVD.
+
+Use a FIPS-compatible **ECDSA or RSA public key that the intended admins can actually use**. If you embed only your personal public key, a different admin cannot SSH into headless guests. GUI passwords are generated separately, one per `node2`, into an owner-only file; share them through your approved secret manager, **never** alongside the ISO or in Git.
 
 ```sh
-cd /home/zrc/git/based-and-confused
-python menu_lab.py \
-  --source /scratch/iso/rhel-10.2-x86_64-dvd.iso \
+cd /home/zrc/git/based-and-confused  # or your own clone
+python build_kickstart_iso.py \
   --rhel8 /scratch/iso/rhel-8.10-x86_64-dvd.iso \
   --rhel9 /scratch/iso/rhel-9.8-x86_64-dvd.iso \
-  --ssh-key ~/.ssh/id_ecdsa.pub \
-  --gui-credentials /scratch/vms/stig-lab-gui-credentials-8.10-9.8-10.2.json \
-  --out /scratch/iso/rhel-stig-lab-menu-next.iso
-PYTHONPATH=. python -m unittest discover -s tests -q
-# Example syntax check; use RHEL9/RHEL10 for the other generated files:
-uvx --from pykickstart ksvalidator -v RHEL8 data/menu-ks/rhel8-node1.ks
+  --rhel10 /scratch/iso/rhel-10.2-x86_64-dvd.iso \
+  --ssh-key /path/to/authorized-team-key.pub \
+  --gui-credentials /scratch/vms/menu-gui-credentials.json \
+  --generate-credentials \
+  --out /scratch/iso/rhel-stig-lab-menu-team.iso
+cd /scratch/iso && sha256sum -c rhel-stig-lab-menu-team.iso.sha256
 ```
 
-The older single-version `lab.py`, `compose.yaml`, and `data/ks/` examples remain in the project for reference; they are not the current eight-node installation path.
+`--generate-credentials` refuses an existing file; for a repeat build with the **same** credentials, omit that flag and provide the existing mode-`0600` file. `--check-only` (also omit `--generate-credentials`) checks file paths, ownership, password hashes, key type, and output safety without writing or inspecting the DVD contents. For a full build, the wrapper runs `menu_lab.py`, which checks the base DVD and BIOS/UEFI boot metadata, embeds all eight Kickstarts and the three installer kernel/initrd pairs, and reads back the boot menus and Kickstarts. A `.sha256` sidecar is generated after the ISO completes. Run `PYTHONPATH=. python -m unittest discover -s tests -q` to check the source; booting/installing a disposable guest remains the end-to-end verification.
+
+**Distribution:** This ISO contains the RHEL 10.2 DVD's packages, password *hashes*, the selected public key, and fixed lab network settings. The RHEL 8/9 DVDs are **not** embedded; the target environment must serve matching full installation trees at `192.168.150.1:8089` on `stig-lab` (see above). Do not commit the ISO or credential JSON to Git; `.gitignore` excludes `*.iso`. Even Git LFS is not a substitute for confirming your organization's Red Hat redistribution rights. Publish the ISO and checksum only to an approved internal artifact repository, after checking access controls and license terms. Distribute GUI credentials separately. This script does not upload anything.
+
+The older single-version `lab.py`, `compose.yaml`, and `data/ks/` examples remain for reference; they are not the current eight-node installation path.
