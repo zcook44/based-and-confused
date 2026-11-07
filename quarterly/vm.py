@@ -14,6 +14,9 @@ import xml.etree.ElementTree as ET
 
 MANIFEST = Path(__file__).with_name('lab.json')
 
+BASE_KEYS = {'gui': 'gui_base_disk', 'controller': 'controller_base_disk', 'node': 'base_disk'}
+BUILD_KEYS = {'gui': 'gui_build_disk', 'controller': 'controller_build_disk', 'node': 'build_disk'}
+
 
 def load_manifest(path=MANIFEST):
     """Load and validate the canonical isolated lab identity and path map."""
@@ -29,18 +32,31 @@ def load_manifest(path=MANIFEST):
     if len({n['address'] for n in lab['nodes']}) != len(lab['nodes']):
         raise ValueError('duplicate node address')
     root = Path(lab['disk_root'])
+    builds, bases, clones = set(), set(), set()
     for node in lab['nodes']:
         release = lab['releases'][node['release']]
         if node['fqdn'] != node['name'] + '.' + net['domain']:
             raise ValueError('invalid FQDN')
         if ipaddress.ip_address(node['address']) not in subnet or node['address'] == net['gateway']:
             raise ValueError('node address is outside network')
-        base_key = {'gui': 'gui_base_disk', 'controller': 'controller_base_disk', 'node': 'base_disk'}.get(node['role'])
+        base_key = BASE_KEYS.get(node['role'])
         if base_key is None:
             raise ValueError('unknown node role')
-        expected_base = release[base_key]
-        if node['image_kind'] != 'clean' or node['base_disk'] != expected_base:
-            raise ValueError('node must use clean release base')
+        build = release[BUILD_KEYS[node['role']]]
+        expected_base = str(root / 'bases' / (node['name'] + '-baseline.qcow2'))
+        if (node['image_kind'] != 'clean' or node['base_disk'] != expected_base
+                or release[base_key] != expected_base):
+            raise ValueError('node must use its own clean baseline disk')
+        if build != str(root / 'build' / (node['name'] + '.qcow2')):
+            raise ValueError('node must use its own build disk')
+        expected_clone = str(root / 'clones' / (node['name'] + '.qcow2'))
+        if node['disk'] != expected_clone or expected_clone in clones:
+            raise ValueError('node must use its own clone disk')
+        if build in builds or expected_base in bases:
+            raise ValueError('duplicate build or baseline disk across nodes')
+        builds.add(build)
+        bases.add(expected_base)
+        clones.add(expected_clone)
         for disk in (node['disk'], node['base_disk']):
             target = Path(disk)
             if not target.is_absolute() or target != Path(str(target.resolve(strict=False))) or not target.is_relative_to(root) or target.suffix != '.qcow2':
@@ -188,11 +204,12 @@ def render_kickstart(lab, node_name, *, username, password_hash, root_password_h
 
 
 def plan_install(lab, node_name, *, kickstart, confirm=None, media_run=_read_command):
-    """Return inert direct-DVD virt-install argv for an unbuilt clean template.
+    """Return inert direct-DVD virt-install argv for a fresh per-node baseline.
 
     This is NOT a readiness signal. Caller must run preflight(), extract kernel
     and initrd from this exact DVD, then inspect generated XML before execution.
-    No command from this function is executed here.
+    No command from this function is executed here. The caller must externally
+    gate against concurrent build/clone/use of this same node identity.
     """
     node = next((n for n in lab['nodes'] if n['name'] == node_name), None)
     if node is None:
@@ -201,12 +218,12 @@ def plan_install(lab, node_name, *, kickstart, confirm=None, media_run=_read_com
         raise ValueError('explicit exact build domain confirmation required')
     release = lab['releases'][node['release']]
     root = Path(lab['disk_root'])
-    build_key = {'gui': 'gui_build_disk', 'controller': 'controller_build_disk', 'node': 'build_disk'}.get(node['role'])
+    build_key = BUILD_KEYS.get(node['role'])
     if build_key is None:
         raise ValueError('unknown node role')
     disk = Path(release[build_key])
-    if not disk.is_relative_to(root / 'build') or disk.suffix != '.qcow2' or disk.exists() or disk.is_symlink():
-        raise ValueError('baseline build disk must be new and owned')
+    if disk != root / 'build' / (node['name'] + '.qcow2') or disk.exists() or disk.is_symlink():
+        raise ValueError('same-node baseline build disk must be new and owned')
     if disk.resolve(strict=False) != disk:
         raise ValueError('build disk resolves outside owned path')
     ks = Path(kickstart)
@@ -241,11 +258,31 @@ def plan_install(lab, node_name, *, kickstart, confirm=None, media_run=_read_com
     ]
 
 
-def plan_clone(lab, node_name, *, base_sha256, confirm=None, info_run=_read_command):
-    """Return inert metadata for an independent clone of a sealed clean base.
+def _standalone_qcow2(info):
+    details = info.get('format-specific') or {}
+    data = details.get('data') or {}
+    children = info.get('children', [])
+    # qemu-img reports the qcow2's own file-protocol node as a child.
+    # Anything else (notably a data-file child) is an external dependency.
+    own_file = (len(children) == 1 and children[0].get('name') == 'file'
+                and children[0].get('info', {}).get('format') == 'file'
+                and not children[0].get('info', {}).get('children'))
+    return (info.get('format') == 'qcow2'
+            and not any(info.get(k) for k in ('backing-filename', 'full-backing-filename',
+                                              'backing-filename-format', 'backing-image'))
+            and 'data-file' not in info and (not children or own_file)
+            and not any(k in data for k in ('backing-filename', 'data-file'))
+            and not data.get('has-backing-file')
+            and not info.get('snapshots'))
 
-    Callers must verify guest installation and offline identity scrubbing first;
-    cloning itself cannot establish either. Never execute a plan as a shell command.
+
+def plan_clone(lab, node_name, *, base_sha256, confirm=None, info_run=_read_command):
+    """Return inert metadata for a same-node clone of its sealed clean baseline.
+
+    No identity scrubbing or sysprep: baseline and clone retain the same node
+    identity. Caller must externally verify installation, seal and ensure the
+    build domain or another guest of this identity is not running concurrently.
+    This function does not inspect domain state. Never execute a plan as a shell command.
     """
     node = next((n for n in lab['nodes'] if n['name'] == node_name), None)
     if node is None or node['image_kind'] != 'clean':
@@ -254,12 +291,12 @@ def plan_clone(lab, node_name, *, base_sha256, confirm=None, info_run=_read_comm
         raise ValueError('explicit exact clone domain confirmation required')
     base, clone = Path(node['base_disk']), Path(node['disk'])
     root = Path(lab['disk_root'])
-    base_key = {'gui': 'gui_base_disk', 'controller': 'controller_base_disk', 'node': 'base_disk'}.get(node['role'])
+    base_key = BASE_KEYS.get(node['role'])
     if base_key is None:
         raise ValueError('unknown node role')
     if (base != Path(lab['releases'][node['release']][base_key])
-            or not base.is_relative_to(root / 'bases')
-            or not clone.is_relative_to(root / 'clones')
+            or base != root / 'bases' / (node['name'] + '-baseline.qcow2')
+            or clone != root / 'clones' / (node['name'] + '.qcow2')
             or base.suffix != '.qcow2' or clone.suffix != '.qcow2'
             or base == clone or base.resolve(strict=False) != base
             or clone.resolve(strict=False) != clone):
@@ -280,8 +317,8 @@ def plan_clone(lab, node_name, *, base_sha256, confirm=None, info_run=_read_comm
         info = json.loads(info_run(['qemu-img', 'info', '--output=json', str(base)]))
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise ValueError('cannot inspect base image') from exc
-    if info.get('format') != 'qcow2' or info.get('backing-filename') or info.get('snapshots'):
-        raise ValueError('base must be standalone qcow2 without snapshots')
+    if not _standalone_qcow2(info):
+        raise ValueError('base must be standalone qcow2 without snapshots or external dependencies')
     return {'node_name': node_name, 'base_disk': str(base), 'disk': str(clone),
             'base_sha256': base_sha256}
 
@@ -307,7 +344,9 @@ def execute_clone(lab, node_name, *, base_sha256, confirm=None, convert_run=subp
     """Revalidate and copy into an owned directory; publish atomically without replacing.
 
     Returns the final disk path. No libvirt or guest operation occurs. The caller
-    still must run preflight and verify the externally sealed clean base.
+    must verify the externally sealed same-node baseline and gate against any
+    concurrently running build or guest of this identity. The pre-creation
+    preflight intentionally reports collisions once this lab is established.
     """
     plan = plan_clone(lab, node_name, base_sha256=base_sha256, confirm=confirm)
     root = Path(lab['disk_root'])
@@ -343,8 +382,8 @@ def execute_clone(lab, node_name, *, base_sha256, confirm=None, convert_run=subp
                         ['qemu-img', 'info', '--output=json', source_path],
                         check=True, capture_output=True, text=True, timeout=20,
                         pass_fds=(source_fd,)).stdout)
-                    if info.get('format') != 'qcow2' or info.get('backing-filename') or info.get('snapshots'):
-                        raise ValueError('base must be standalone qcow2 without snapshots')
+                    if not _standalone_qcow2(info):
+                        raise ValueError('base must be standalone qcow2 without snapshots or external dependencies')
                     # The target is never passed to qemu-img. It can only be
                     # installed by link(2), which fails if any entry already exists.
                     temp_name = '.clone-' + uuid.uuid4().hex + '.qcow2'

@@ -18,8 +18,8 @@ class QuarterlyVMTests(unittest.TestCase):
         lab = vm.load_manifest(MANIFEST)
         lab['disk_root'] = str(root)
         node = next(n for n in lab['nodes'] if n['name'] == 'qa-rhel9-node1')
-        base = root / 'bases' / 'clean.qcow2'
-        target = root / 'clones' / 'node.qcow2'
+        base = root / 'bases' / (node['name'] + '-baseline.qcow2')
+        target = root / 'clones' / (node['name'] + '.qcow2')
         base.parent.mkdir(mode=0o700)
         target.parent.mkdir(mode=0o700)
         subprocess.run(['qemu-img', 'create', '-f', 'qcow2', str(base), '1M'],
@@ -29,6 +29,66 @@ class QuarterlyVMTests(unittest.TestCase):
         node['disk'] = str(target)
         lab['releases'][node['release']]['base_disk'] = str(base)
         return lab, node, base, target, hashlib.sha256(base.read_bytes()).hexdigest()
+
+    def test_manifest_has_eight_node_owned_build_baseline_and_clone_paths(self):
+        lab = vm.load_manifest(MANIFEST)
+        root = Path(lab['disk_root'])
+        self.assertEqual(len(lab['nodes']), 8)
+        builds, bases = [], []
+        for node in lab['nodes']:
+            release = lab['releases'][node['release']]
+            build_key = {'node': 'build_disk', 'gui': 'gui_build_disk',
+                         'controller': 'controller_build_disk'}[node['role']]
+            base_key = {'node': 'base_disk', 'gui': 'gui_base_disk',
+                        'controller': 'controller_base_disk'}[node['role']]
+            builds.append(release[build_key])
+            bases.append(node['base_disk'])
+            self.assertEqual(release[build_key], str(root / 'build' / (node['name'] + '.qcow2')))
+            self.assertEqual(release[base_key], node['base_disk'])
+            self.assertEqual(node['base_disk'], str(root / 'bases' / (node['name'] + '-baseline.qcow2')))
+            self.assertEqual(node['disk'], str(root / 'clones' / (node['name'] + '.qcow2')))
+        self.assertEqual(len(set(builds)), len(builds))
+        self.assertEqual(len(set(bases)), len(bases))
+
+    def test_manifest_rejects_shared_or_misnamed_build_and_baseline_paths(self):
+        original = json.loads(MANIFEST.read_text())
+        for key in ('build_disk', 'base_disk'):
+            lab = json.loads(json.dumps(original))
+            first = next(n for n in lab['nodes'] if n['name'] == 'qa-rhel9-node1')
+            second = next(n for n in lab['nodes'] if n['name'] == 'qa-rhel10-node1')
+            lab['releases'][second['release']][key] = lab['releases'][first['release']][key]
+            if key == 'base_disk':
+                second['base_disk'] = first['base_disk']
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / 'lab.json'
+                path.write_text(json.dumps(lab))
+                with self.assertRaises(ValueError):
+                    vm.load_manifest(path)
+        for key in ('build_disk', 'base_disk'):
+            lab = json.loads(json.dumps(original))
+            node = next(n for n in lab['nodes'] if n['name'] == 'qa-rhel9-node1')
+            wrong = str(Path(lab['disk_root']) / ('build' if key == 'build_disk' else 'bases') / 'shared.qcow2')
+            lab['releases']['rhel9'][key] = wrong
+            if key == 'base_disk':
+                node['base_disk'] = wrong
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / 'lab.json'
+                path.write_text(json.dumps(lab))
+                with self.assertRaises(ValueError):
+                    vm.load_manifest(path)
+
+    def test_manifest_rejects_shared_or_misnamed_clone_path(self):
+        original = json.loads(MANIFEST.read_text())
+        for disk in (next(n for n in original['nodes'] if n['name'] == 'qa-rhel10-node1')['disk'],
+                     str(Path(original['disk_root']) / 'clones' / 'shared.qcow2')):
+            lab = json.loads(json.dumps(original))
+            node = next(n for n in lab['nodes'] if n['name'] == 'qa-rhel9-node1')
+            node['disk'] = disk
+            with self.subTest(disk=disk), tempfile.TemporaryDirectory() as d:
+                path = Path(d) / 'lab.json'
+                path.write_text(json.dumps(lab))
+                with self.assertRaises(ValueError):
+                    vm.load_manifest(path)
 
     def test_execute_clone_real_qcow2_copy_and_no_leftover_temp(self):
         with tempfile.TemporaryDirectory() as d:
@@ -168,7 +228,7 @@ class QuarterlyVMTests(unittest.TestCase):
             lab['disk_root'] = d
             for node in lab['nodes']:
                 node['disk'] = str(Path(d) / 'clones' / (node['name'] + '.qcow2'))
-                node['base_disk'] = str(Path(d) / 'bases' / ('clean-' + node['release'] + '.qcow2'))
+                node['base_disk'] = str(Path(d) / 'bases' / (node['name'] + '-baseline.qcow2'))
             outputs = {
                 ('ip', '-j', '-4', 'route', 'show', 'table', 'all'): '[]',
                 ('virsh', '-c', 'qemu:///system', 'net-list', '--all', '--name'): 'stig-lab\n',
@@ -244,8 +304,8 @@ class QuarterlyVMTests(unittest.TestCase):
                 release['dvd'] = str(root / 'vendor.iso')
                 release['kernel'] = str(root / 'installers' / 'vmlinuz')
                 release['initrd'] = str(root / 'installers' / 'initrd.img')
-                release['build_disk'] = str(root / 'build' / 'clean.qcow2')
-                release['gui_build_disk'] = str(root / 'build' / 'clean-gui.qcow2')
+            lab['releases']['rhel9']['build_disk'] = str(root / 'build' / 'qa-rhel9-node1.qcow2')
+            lab['releases']['rhel9']['gui_build_disk'] = str(root / 'build' / 'qa-rhel9-node2.qcow2')
             (root / 'vendor.iso').touch()
             (root / 'installers').mkdir()
             for name in ('vmlinuz', 'initrd.img'):
@@ -269,9 +329,9 @@ class QuarterlyVMTests(unittest.TestCase):
             self.assertIn('inst.ks=file:/node.ks', ' '.join(cmd))
             self.assertIn('inst.stage2=hd:LABEL=' + volume, ' '.join(cmd))
             self.assertIn('inst.repo=cdrom', ' '.join(cmd))
-            self.assertIn('path=' + str(root / 'build' / 'clean.qcow2'), ' '.join(cmd))
+            self.assertIn('path=' + str(root / 'build' / 'qa-rhel9-node1.qcow2'), ' '.join(cmd))
             gui_cmd = vm.plan_install(lab, 'qa-rhel9-node2', kickstart=ks, media_run=media_run, confirm='build-qa-rhel9-node2')
-            self.assertIn('path=' + str(root / 'build' / 'clean-gui.qcow2'), ' '.join(gui_cmd))
+            self.assertIn('path=' + str(root / 'build' / 'qa-rhel9-node2.qcow2'), ' '.join(gui_cmd))
             self.assertNotIn('http:', ' '.join(cmd))
             self.assertNotIn('https:', ' '.join(cmd))
             self.assertIn('fips=1', ' '.join(cmd))
@@ -293,8 +353,8 @@ class QuarterlyVMTests(unittest.TestCase):
             root = Path(d)
             lab['disk_root'] = d
             node = lab['nodes'][0]
-            base = root / 'bases' / 'clean.qcow2'
-            clone = root / 'clones' / 'node.qcow2'
+            base = root / 'bases' / (node['name'] + '-baseline.qcow2')
+            clone = root / 'clones' / (node['name'] + '.qcow2')
             base.parent.mkdir()
             base.write_bytes(b'qcow2 fixture, not a VM')
             base.chmod(0o444)
@@ -324,6 +384,31 @@ class QuarterlyVMTests(unittest.TestCase):
             clone.unlink()
             with self.assertRaises(ValueError):
                 vm.plan_clone(lab, node['name'], base_sha256=digest, info_run=lambda a: '{"format":"qcow2","backing-filename":"untrusted.qcow2"}', confirm=node['name'])
+
+    def test_clone_plan_rejects_external_qcow2_dependencies(self):
+        with tempfile.TemporaryDirectory() as d:
+            lab, node, _, _, digest = self.clone_fixture(Path(d))
+            variants = (
+                {'format': 'qcow2', 'format-specific': {'data': {'data-file': 'payload.raw'}}},
+                {'format': 'qcow2', 'children': [{'name': 'external'}]},
+                {'format': 'qcow2', 'format-specific': {'data': {'has-backing-file': True}}},
+            )
+            for info in variants:
+                with self.subTest(info=info), self.assertRaises(ValueError):
+                    vm.plan_clone(lab, node['name'], base_sha256=digest,
+                                  confirm=node['name'], info_run=lambda _args: json.dumps(info))
+
+    def test_clone_plan_rejects_real_external_data_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            lab, node, base, _, _ = self.clone_fixture(Path(d))
+            base.unlink()
+            subprocess.run(['qemu-img', 'create', '-f', 'qcow2',
+                            '-o', 'data_file=' + str(Path(d) / 'payload.raw'),
+                            str(base), '1M'], check=True, capture_output=True)
+            base.chmod(0o400)
+            digest = hashlib.sha256(base.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, 'external dependencies'):
+                vm.plan_clone(lab, node['name'], base_sha256=digest, confirm=node['name'])
 
     def test_preflight_fails_closed_when_inspection_fails(self):
         with self.assertRaises(vm.PreflightError):

@@ -1,7 +1,9 @@
 """Validate operator documentation after centralizing the root guides."""
 from pathlib import Path
+import os
 import re
 import subprocess
+import tempfile
 import unittest
 from urllib.parse import unquote
 
@@ -39,6 +41,24 @@ class DocumentationLinks(unittest.TestCase):
                 with self.subTest(doc=doc.name, block=index):
                     result = subprocess.run(['bash', '-n'], input=block, text=True, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_workflow_seal_image_gate_real_qcow2(self):
+        workflow = (ROOT / 'docs' / 'QUARTERLY-WORKFLOW.md').read_text()
+        match = re.search(r'(?ms)^check_image\(\) \{\n(.*?)^\}', workflow)
+        assert match is not None, 'documented seal image gate missing'
+        check = match.group(0) + '\ncheck_image "$1"\n'
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
+            plain, external = (Path(tmp) / n for n in ('plain.qcow2', 'external.qcow2'))
+            subprocess.run(['qemu-img', 'create', '-f', 'qcow2', str(plain), '1M'],
+                           check=True, capture_output=True)
+            subprocess.run(['qemu-img', 'create', '-f', 'qcow2',
+                            '-o', 'data_file=' + str(Path(tmp) / 'payload.raw'),
+                            str(external), '1M'], check=True, capture_output=True)
+            for path, accepted in ((plain, True), (external, False)):
+                with self.subTest(path=path.name):
+                    result = subprocess.run(['bash', '-c', check, 'check_image', str(path)],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
 
 if __name__ == '__main__':
