@@ -2,7 +2,7 @@
 
 This is the **operator sequence**, not a one-command deployment. Run from the repository root on the `feature/quarterly-stig-evidence-lab` branch with `/usr/bin/python3`. Use the same sequence for each quarterly cycle and each asset. The first cycle must build and prove clean bases before clones are possible. See [QUARTERLY-LAB.md](QUARTERLY-LAB.md) for design, safety constraints, and validation limits.
 
-**Current readiness:** the CLI can render plans/Kickstarts and release a schema-validated CKLB from supplied evidence. It does **not** define or boot VMs, seal/sysprep images, remediate guests, perform assessments, obtain approvals, or sign an ISSO review. On this workstation the matching DVDs, extracted installer kernels/initrds, and pinned DISA CKLB schema exist, but **no new lab network, clean base, or guest scan has been established**. `ksvalidator` and host-side `oscap` are not installed. Do not treat the steps below as a completed run.
+**Current readiness:** the CLI can render plans/Kickstarts and release a schema-validated CKLB from supplied evidence. Separate scripts can prepare an offline candidate and an offline personalized clone, but do **not** promote a base, define or boot VMs, remediate guests, perform assessments, obtain approvals, or sign an ISSO review. On this workstation the matching DVDs, extracted installer kernels/initrds, and pinned DISA CKLB schema exist, but **no new lab network, clean base, or guest scan has been established**. `virt-sysprep`, `virt-customize`, `ksvalidator`, and host-side `oscap` are not installed. Do not treat the steps below as a completed run.
 
 ## 0. Choose scope and gather inputs
 
@@ -65,7 +65,16 @@ install -d -m 0700 /scratch/vms/quarterly/private /scratch/vms/quarterly/build /
 
 Boot the **new** `build-qa-rhel9-node1` guest and verify installer completion, release/hostname/static IP, SSH host-key identity and key login, package source, FIPS (`fips-mode-setup --check`, `/proc/sys/crypto/fips_enabled`, installed boot arguments), SELinux enforcing/labels, and `labadmin`'s `sudo -n`. For a GUI role, verify graphical target and an actual password-based desktop login. Keep installation logs and a pre-remediation assessment outside the guest.
 
-**Stop gate — not implemented by the CLI:** shut down the build VM, remove instance-specific machine ID, SSH *host* keys, registration entitlements, logs and other instance secrets with an approved **offline** sysprep procedure, then boot a disposable test copy to prove fresh unique identity and reachable access. Preserve a separate **clean pre-remediation** base and separately create a **hardened reference** for drift tests. Only after these checks may the operator place a standalone qcow2 at `/scratch/vms/quarterly/bases/clean-rhel9.qcow2`, make it read-only, and record its SHA-256 in the cycle manifest. Do **not** merely copy a live installed disk or start two guests with duplicate IDs/keys. Base creation, safe domain teardown, and sysprep are not provided here.
+**Stop gate — partially scripted, not automated end to end:** export evidence before log removal, shut down the exact build VM, and obtain authorization for the reviewed offline scrub operations in [the sysprep guide](QUARTERLY-SYSPREP.md). The script only makes an **unbootable candidate copy**, never a base:
+
+```bash
+scripts/quarterly-sysprep.sh --check --node qa-rhel9-node1
+# Approval required before running --execute; see the linked guide.
+scripts/quarterly-sysprep.sh --execute --node qa-rhel9-node1 \
+  --confirm build-qa-rhel9-node1
+```
+
+The candidate has no static NetworkManager profile and may retain the build hostname. **Do not boot it.** Independently personalize **two disposable canary copies offline before first boot**, with different FQDNs/addresses; boot and verify unique machine IDs, SSH host keys, network access, user key login, FIPS/SELinux, and GUI where applicable. No canary-copy/promotion automation is supplied. Preserve a **clean pre-remediation** base and separately create a **hardened reference** for drift tests. Only after those checks and approval may the operator publish a standalone no-overwrite qcow2 at the manifest base path, set it read-only and record/recheck its SHA-256 in the cycle manifest. Do not copy a live disk, boot duplicate identities, or mistake a script success for permission to promote. Safe domain teardown is also manual.
 
 ## 4. Clone and boot the assessed asset
 
@@ -78,7 +87,15 @@ With the base externally sealed and its exact digest recorded, run the plan, the
   --base-sha256 '<recorded-64-hex-base-sha256>' --confirm qa-rhel9-node1
 ```
 
-**Manual domain gate:** inspect the resulting clone's ownership and image chain; create a **new** `qa-rhel9-node1` libvirt domain referencing only `/scratch/vms/quarterly/clones/qa-rhel9-node1.qcow2` on `stigqa-lab`. Dry-run and inspect the domain XML before `virt-install --import`/definition. Boot it, verify its unique machine ID/SSH host keys, static IP/FQDN, access, and no copied registration secret. Do not attach a sealed base or another asset's disk to a running domain. If a clone name or disk already exists, stop and investigate rather than overwriting it.
+**Personalize before first boot:** the CLI output is **unpersonalized** and must not be booted. Follow [the offline personalization guide](QUARTERLY-PERSONALIZE.md) for the read-only check, explicit execution, and readback:
+
+```bash
+scripts/quarterly-personalize.sh --check --node qa-rhel9-node1
+scripts/quarterly-personalize.sh --execute --node qa-rhel9-node1 \
+  --confirm qa-rhel9-node1
+```
+
+**Manual domain gate:** inspect the resulting image's ownership and chain. Create a **new** `qa-rhel9-node1` libvirt domain referencing **only** `/scratch/vms/quarterly/clones/qa-rhel9-node1.personalized.qcow2` on `stigqa-lab`, with a distinct MAC. Dry-run and inspect the domain XML before `virt-install --import`/definition. Boot it, verify its new unique machine ID/SSH host keys, static IP/FQDN, public-key access, and no copied registration secret. Do not boot or attach the unpersonalized CLI clone, a sealed base, or another asset's disk. If a name or disk already exists, stop and investigate rather than overwriting it.
 
 ## 5. Prepare the versioned policy, tailoring, and independent approval
 
