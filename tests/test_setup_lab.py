@@ -133,6 +133,63 @@ class SetupLabTests(unittest.TestCase):
                     self.assertFalse((root / 'repo' / ('rhel' + major + '.partial')).exists())
             self.assertEqual((root / 'docker.log').read_text().splitlines(), [str(root / 'repo')] * 2)
 
+    def test_auto_falls_back_to_podman_compose_when_docker_is_unusable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            fixture(root)
+            fake = root / 'bin'
+            fake.mkdir()
+            (fake / 'virsh').write_text('#!/bin/sh\ncase "$*" in *net-dumpxml*) /usr/bin/cat "$FAKE_XML" ;; *net-info*) printf "Name: stig-lab\\nActive: yes\\nAutostart: yes\\n" ;; esac\n')
+            (fake / 'docker').write_text('#!/bin/sh\ncase "$*" in *info*) exit 1 ;; esac\nexit 0\n')
+            (fake / 'podman').write_text('#!/bin/sh\ncase "$*" in *up*) printf "podman %s\\n" "$LAB_REPO_DIR" >> "$FAKE_LOG" ;; esac\n')
+            (fake / 'curl').write_text('#!/bin/sh\nexit 0\n')
+            (fake / 'ip').write_text('#!/bin/sh\nexit 0\n')
+            (fake / 'sudo').write_text('#!/bin/sh\necho unexpected-sudo >&2; exit 1\n')
+            for path in fake.iterdir():
+                path.chmod(0o755)
+            env = dict(os.environ, PATH=str(fake) + ':' + os.environ['PATH'],
+                       FAKE_XML=str(ROOT / 'stig-lab-network.xml'), FAKE_LOG=str(root / 'engine.log'))
+            base = ['bash', str(ROOT / 'setup-lab.sh'), '--media-dir', str(root / 'media'),
+                    '--repo-dir', str(root / 'repo'), '--checksums', str(root / 'vendor.sha256')]
+            result = subprocess.run([*base, 'prepare'], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('podman', result.stdout.lower())
+            self.assertEqual((root / 'engine.log').read_text().strip(), f'podman {root / "repo"}')
+            forced = subprocess.run([*base, '--engine', 'docker', 'check'], cwd=ROOT, env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(forced.returncode, 0)
+            self.assertIn('Docker', forced.stderr)
+            (fake / 'docker').write_text('#!/bin/sh\nexit 0\n')
+            preferred = subprocess.run([*base, 'check'], cwd=ROOT, env=env,
+                                       capture_output=True, text=True)
+            self.assertEqual(preferred.returncode, 0, preferred.stderr)
+            self.assertIn('Container engine: docker', preferred.stdout)
+            chosen = subprocess.run([*base, '--engine', 'podman', 'prepare'], cwd=ROOT, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(chosen.returncode, 0, chosen.stderr)
+            self.assertEqual((root / 'engine.log').read_text().splitlines(),
+                             [f'podman {root / "repo"}'] * 2)
+
+    def test_auto_rejects_podman_without_compose_provider(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            fixture(root)
+            fake = root / 'bin'
+            fake.mkdir()
+            (fake / 'docker').write_text('#!/bin/sh\ncase "$*" in *info*) exit 1 ;; esac\nexit 0\n')
+            (fake / 'podman').write_text('#!/bin/sh\ncase "$*" in *"compose version"*) exit 1 ;; esac\nexit 0\n')
+            (fake / 'virsh').write_text('#!/bin/sh\nexit 0\n')
+            (fake / 'ip').write_text('#!/bin/sh\nexit 0\n')
+            for path in fake.iterdir():
+                path.chmod(0o755)
+            env = dict(os.environ, PATH=str(fake) + ':' + os.environ['PATH'])
+            command = ['bash', str(ROOT / 'setup-lab.sh'), '--media-dir', str(root / 'media'),
+                       '--repo-dir', str(root / 'repo'), '--checksums', str(root / 'vendor.sha256'), 'check']
+            result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Compose provider', result.stderr)
+            self.assertFalse((root / 'repo').exists())
+
     def test_build_and_verify_synthetic_iso_without_vms(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

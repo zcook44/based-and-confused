@@ -4,10 +4,12 @@ from dataclasses import dataclass
 import argparse
 import hmac
 import json
+import os
 import pathlib
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 from lab import extract, inspect_treeinfo, render_kickstart, xorriso
@@ -49,7 +51,7 @@ def render_node(node: Node, key: str, gui_password_hash: str | None = None) -> s
         ks = ks.replace('user --name=labadmin --groups=wheel --lock',
                         f'user --name=labadmin --groups=wheel --iscrypted --password="{gui_password_hash}"', 1)
     if node.role == 'rheladm':
-        ks = ks.replace('chrony\n%end', 'chrony\nansible-core\n%end', 1)
+        ks = ks.replace('shadow-utils\n%end', 'shadow-utils\nansible-core\n%end', 1)
     if node.role == 'node2':
         ks = ks.replace('@^minimal-environment', '@^graphical-server-environment', 1)
         ks = ks.replace('xccdf_org.ssgproject.content_profile_stig',
@@ -91,7 +93,35 @@ LAB_HOSTS
 cat /tmp/lab-identity >> /mnt/sysroot/etc/hosts
 %end
 '''
-    return ks.replace('reboot --eject', post + 'reboot --eject')
+    ks = ks.replace('reboot --eject', post + 'reboot --eject')
+    return finalize_kickstart(ks, 'labadmin', node.version)
+
+
+def render_final_post(username: str, version: str) -> str:
+    """Embed the shared repair, executed by the installed target's Bash/tools."""
+    if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', username) or username == 'root':
+        raise ValueError('unsafe postinstall username')
+    if version not in ('8', '9', '10'):
+        raise ValueError('unsupported postinstall release')
+    script = pathlib.Path(__file__).resolve().parent / 'scripts/lab-postinstall.sh'
+    return ('# LAB_POSTINSTALL_BEGIN\n'
+            '%post --log=/root/lab-postinstall.log --erroronfail --interpreter=/bin/bash\n'
+            f'set -- {username} {version}\n' + script.read_text().rstrip() + '\n'
+            '%end\n# LAB_POSTINSTALL_END\n')
+
+
+def finalize_kickstart(source: str, username: str, version: str) -> str:
+    """Refresh the embedded final repair after private/source transformations."""
+    begin, end = '# LAB_POSTINSTALL_BEGIN\n', '# LAB_POSTINSTALL_END\n'
+    counts = (source.count(begin), source.count(end))
+    if counts not in ((0, 0), (1, 1)):
+        raise ValueError('malformed or duplicate final postinstall markers')
+    source, removed = re.subn(r'(?ms)^# LAB_POSTINSTALL_BEGIN\n.*?^# LAB_POSTINSTALL_END\n', '', source)
+    if removed != counts[0]:
+        raise ValueError('malformed final postinstall block')
+    if len(re.findall(r'(?m)^reboot --eject$', source)) != 1 or not source.endswith('reboot --eject\n'):
+        raise ValueError('source must end with exactly one reboot --eject directive')
+    return re.sub(r'(?m)^reboot --eject$', lambda _: render_final_post(username, version) + 'reboot --eject', source)
 
 
 def render_grub(firmware: str) -> str:
@@ -195,6 +225,24 @@ def load_gui_credentials(path: pathlib.Path) -> dict[str, str]:
 
 
 def main():
+    if sys.argv[1:2] == ['postinstall']:
+        p = argparse.ArgumentParser(description='Refresh a source Kickstart final repair; no ISO or VM actions')
+        p.add_argument('--source', required=True, type=pathlib.Path)
+        p.add_argument('--out', required=True, type=pathlib.Path)
+        p.add_argument('--username', required=True)
+        p.add_argument('--version', required=True)
+        a = p.parse_args(sys.argv[2:])
+        try:
+            if a.source.is_symlink() or a.out.is_symlink() or a.source.resolve() == a.out.resolve():
+                raise ValueError('source/output must be distinct non-symlink paths')
+            data = finalize_kickstart(a.source.read_text(), a.username, a.version)
+            fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'w') as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(data)
+        except (ValueError, OSError) as e:
+            p.exit(1, f'error: {e}\n')
+        return
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source', required=True, type=pathlib.Path, help='official RHEL 10.2 full DVD')
     p.add_argument('--rhel8', required=True, type=pathlib.Path, help='official RHEL 8.10 full DVD')

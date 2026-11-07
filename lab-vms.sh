@@ -5,7 +5,7 @@ set -euo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly ISO="${LAB_ISO:-/scratch/iso/rhel-stig-lab-menu-8.10-9.8-10.2-gui-login.iso}"
+readonly ISO="${LAB_ISO:-/scratch/iso/rhel-stig-lab-menu-8.10-9.8-10.2-labadmin-sudo-final.iso}"
 readonly VM_DIR="${LAB_VM_DIR:-/scratch/vms}"
 readonly KERNEL_DIR="${LAB_KERNEL_DIR:-${VM_DIR}/.installer-kernels-8.10-9.8-10.2}"
 readonly ENV_FILE="${LAB_ENV_FILE:-${SCRIPT_DIR}/lab-vms.env}"
@@ -75,7 +75,8 @@ hash_password() {
 }
 
 prepare_ks() {
-  local name=$1 base tmp out user_hash root_hash line
+  local name=$1 base tmp out user_hash root_hash line version role ip
+  lookup_node "$name"
   out="$VM_DIR/$name.ks"
   if ((dry_run)); then
     printf 'Would generate private Kickstart: %s (hashes only)\n' "$out"
@@ -105,11 +106,18 @@ prepare_ks() {
       *) printf '%s\n' "$line" >> "$tmp" ;;
     esac
   done < "$base"
-  rm -f -- "$base"
   if ((root_count!=1 || user_count!=1 || key_count!=1)); then
-    rm -f -- "$tmp"
+    rm -f -- "$base" "$tmp"
     die "Unexpected Kickstart account structure for $name; refusing install"
   fi
+  # Refresh last, AFTER identity/hash/source edits. This also upgrades old
+  # embedded Kickstarts and replaces (rather than duplicates) a newer repair.
+  if ! python3 "$SCRIPT_DIR/menu_lab.py" postinstall --source "$tmp" --out "$base" \
+      --username "$username" --version "$version"; then
+    rm -f -- "$base" "$tmp"
+    die "Unable to finalize private Kickstart for $name"
+  fi
+  mv -f -- "$base" "$tmp"
   chmod 600 -- "$tmp"
   mv -f -- "$tmp" "$out"
   printf 'Prepared private Kickstart: %s (hashes only)\n' "$out"

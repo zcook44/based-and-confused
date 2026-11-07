@@ -70,6 +70,8 @@ openscap-utils
 aide
 audit
 chrony
+sudo
+shadow-utils
 %end
 {hardening}
 # Expected datastream on the installed guest: ssg-rhel{version}-ds.xml

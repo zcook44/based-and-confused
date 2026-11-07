@@ -9,16 +9,19 @@ checksums="$ROOT/vendor-checksums.sha256"
 output=''
 credentials=/scratch/vms/menu-gui-credentials-team.json
 ssh_key=''
+engine=auto
+container_engine=''
 generate_credentials=0
 
 usage() {
   cat <<'HELP'
 Usage: setup-lab.sh [options] <check|prepare|build-iso|verify>
   check      Read-only: dependencies, exact vendor DVD checksums/versions, network conflict.
-  prepare    Define/start the lab network if needed; stage RHEL 8/9 trees; serve via Docker.
+  prepare    Define/start the lab network if needed; stage RHEL 8/9 trees; serve via Compose.
   build-iso  Build a new eight-entry ISO (never overwrites); requires --ssh-key.
   verify     Check served repositories, ISO SHA-256, eight entries and boot metadata.
 Options:
+  --engine auto|docker|podman  Compose engine (default auto: working Docker, then Podman)
   --media-dir DIR       Full vendor DVDs and generated ISO (default /scratch/iso)
   --repo-dir DIR        Extracted DVD trees (default MEDIA_DIR/repo)
   --checksums FILE      Vendor DVD SHA-256 file (default ./vendor-checksums.sha256)
@@ -34,7 +37,7 @@ need() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
 while (($#)); do
   case $1 in
-    --media-dir|--repo-dir|--checksums|--out|--ssh-key|--credentials)
+    --media-dir|--repo-dir|--checksums|--out|--ssh-key|--credentials|--engine)
       (($# >= 2)) || die "Missing value for $1"
       case $1 in
         --media-dir) media_dir=$2 ;;
@@ -43,6 +46,7 @@ while (($#)); do
         --out) output=$2 ;;
         --ssh-key) ssh_key=$2 ;;
         --credentials) credentials=$2 ;;
+        --engine) engine=$2 ;;
       esac
       shift 2 ;;
     --generate-credentials) generate_credentials=1; shift ;;
@@ -55,6 +59,7 @@ while (($#)); do
   esac
 done
 [[ -n ${phase:-} ]] || { usage >&2; exit 2; }
+case $engine in auto|docker|podman) ;; *) die "Invalid --engine: $engine (use auto, docker or podman)" ;; esac
 [[ -n $repo_dir ]] || repo_dir="$media_dir/repo"
 [[ -n $output ]] || output="$media_dir/rhel-stig-lab-menu-team.iso"
 # Normalize paths before changing directory or passing them to Compose.
@@ -143,10 +148,32 @@ if (bridge is None or bridge.get("name") != "virbr-stig" or ip is None
   fi
 }
 
+engine_ready() {
+  command -v "$1" >/dev/null 2>&1 &&
+    "$1" info >/dev/null 2>&1 &&
+    "$1" compose version >/dev/null 2>&1
+}
+
+select_engine() {
+  case $engine in
+    auto)
+      if engine_ready docker; then
+        container_engine=docker
+      elif engine_ready podman; then
+        container_engine=podman
+      else
+        die 'Neither Docker with Compose nor Podman with a Compose provider is usable'
+      fi ;;
+    docker|podman)
+      engine_ready "$engine" || die "${engine^} is unavailable, inaccessible, or lacks a working Compose provider"
+      container_engine=$engine ;;
+  esac
+  printf 'Container engine: %s (Compose available)\n' "$container_engine"
+}
+
 check_host() {
-  need docker; need curl
-  docker compose version >/dev/null || die 'Docker Compose plugin unavailable'
-  docker info >/dev/null 2>&1 || die 'Cannot use Docker daemon'
+  need curl
+  select_engine
   virsh -c qemu:///system list --all >/dev/null || die 'Cannot access system libvirt'
   network_status
 }
@@ -194,7 +221,7 @@ prepare_lab() {
     validate_tree "$target.partial" "$version"
     mv -- "$target.partial" "$target"
   done
-  LAB_REPO_DIR="$repo_dir" docker compose -p rhel-stig-lab-repo -f "$ROOT/compose.repo.yaml" up -d --build
+  LAB_REPO_DIR="$repo_dir" "$container_engine" compose -p rhel-stig-lab-repo -f "$ROOT/compose.repo.yaml" up -d --build
   check_http
   printf 'Lab network and repositories ready. Review host bridge-scoped firewall policy before guest installs.\n'
 }

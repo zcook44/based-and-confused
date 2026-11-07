@@ -6,7 +6,7 @@ This gets a **new x86_64 Linux host** from a Git clone to a bootable, eight-entr
 
 ## 1. Prepare the host and clone
 
-Have an x86_64 host with KVM, system libvirt (`qemu:///system`), `virsh`, `virt-install` (for the optional Bash bootstrap), and virt-manager (for a manual walkthrough). Install Python **3.10+**, OpenSSL, `xorriso`, Git, Docker Engine with the Compose plugin, and enough free storage for **three full DVDs, an approximately 12 GiB output ISO, two extracted repository trees, and 64 GiB per VM disk**. The repository container uses `python:3.13-alpine`; on an air-gapped host, preload that image into Docker before `compose up`. The bootstrap currently expects `/usr/bin/python3` and `/usr/sbin/virt-install`; check those paths before using it. Use the host's supported package installation method; this project does not install host dependencies.
+Have an x86_64 host with KVM, system libvirt (`qemu:///system`), `virsh`, `virt-install` (for the optional Bash bootstrap), and virt-manager (for a manual walkthrough). Install Python **3.10+**, OpenSSL, `xorriso`, Git, **either Docker Engine with Compose or Podman with a working external Compose provider**, and enough free storage for **three full DVDs, an approximately 12 GiB output ISO, two extracted repository trees, and 64 GiB per VM disk**. Podman's `podman compose` delegates to a provider such as `podman-compose` or `docker-compose`; installing only the `podman` binary is not sufficient.[4] The repository container uses `python:3.13-alpine`; on an air-gapped host, preload that image into your chosen engine before `compose up`. The bootstrap currently expects `/usr/bin/python3` and `/usr/sbin/virt-install`; check those paths before using it. Use the host's supported package installation method; this project does not install host dependencies.
 
 Clone from your organization's approved repository URL (not provided by this project). **Maintainers:** commit and push this guide, `setup-lab.sh`, `vendor-checksums.sha256`, `build_kickstart_iso.py`, `compose.repo.yaml`, and the tests before asking another admin to clone; uncommitted worktree files are not in the remote repository.
 
@@ -15,9 +15,9 @@ REPO_URL='REPLACE_WITH_YOUR_APPROVED_GIT_URL'
 mkdir -p "$HOME/git"
 git clone "$REPO_URL" "$HOME/git/based-and-confused"
 cd "$HOME/git/based-and-confused"
-command -v python3 openssl xorriso virsh docker
+command -v python3 openssl xorriso virsh
+command -v docker || command -v podman
 python3 --version
-docker compose version
 virsh -c qemu:///system list --all
 ```
 
@@ -54,7 +54,7 @@ PUBKEY='/path/to/authorized-team-key.pub'  # replace this path
 ./setup-lab.sh verify
 ```
 
-`check` is read-only: it validates dependencies, vendor SHA-256 values, release metadata, free space, and the lab network. `prepare` defines/starts the network only if needed, extracts the RHEL 8/9 DVDs through non-overwriting staging directories, and serves them via Docker. `build-iso` calls the existing Python builder; the default output is `/scratch/iso/rhel-stig-lab-menu-team.iso`, and GUI credentials go into an owner-only file at `/scratch/vms/menu-gui-credentials-team.json`. `verify` checks both HTTP repositories, output SHA-256, eight Kickstarts, three kernel pairs, and both boot menus. The script has `--media-dir`, `--repo-dir`, `--checksums`, `--out`, and `--credentials` overrides; use `./setup-lab.sh --help` for the interface. An existing output ISO or stale `.partial` tree is **never replaced**.
+`check` is read-only: it validates dependencies, vendor SHA-256 values, release metadata, free space, and the lab network. `prepare` defines/starts the network only if needed, extracts the RHEL 8/9 DVDs through non-overwriting staging directories, and serves them via the selected Compose engine. The default `--engine auto` prefers a **working Docker daemon + Compose** and falls back to **Podman + a working Compose provider**; set `--engine podman` (or `--engine docker`) before the phase to force a choice. `check` reports the selected engine. Do not start a second engine's copy of this service while the first owns `192.168.150.1:8089`; stop or migrate it deliberately rather than letting this script kill anything. `build-iso` calls the existing Python builder; the default output is `/scratch/iso/rhel-stig-lab-menu-team.iso`, and GUI credentials go into an owner-only file at `/scratch/vms/menu-gui-credentials-team.json`. `verify` checks both HTTP repositories, output SHA-256, eight Kickstarts, three kernel pairs, and both boot menus. The script has `--media-dir`, `--repo-dir`, `--checksums`, `--out`, and `--credentials` overrides; use `./setup-lab.sh --help` for the interface. An existing output ISO or stale `.partial` tree is **never replaced**.
 
 The script does **not** download DVDs, configure the host firewall, create VMs, or upload artifacts. Review `setup-firewall.sh` and apply its bridge-scoped UFW rules if UFW is active; use equivalent rules for another firewall. The next three sections are the **manual alternative and recovery reference**, not additional steps after a successful automated run. Continue at [Install one VM](#6-install-one-vm-then-expand).
 
@@ -73,7 +73,7 @@ If `stig-lab` already exists, inspect it with `net-info` rather than redefining 
 
 ## 4. Manual alternative: extract and serve the RHEL 8/9 installation trees
 
-These are full local DVD trees, not a PXE service. Extraction needs substantial disk space and time. On a fresh machine, create **empty** destinations, then extract; do not merge over an existing repository tree.
+These are full local DVD trees, not a PXE service. Extraction needs substantial disk space and time. On a fresh machine, create **empty** destinations, then extract; do not merge over an existing repository tree. The following manual example uses Docker; substitute `podman compose` if you selected Podman and have a working Compose provider.
 
 ```sh
 cd "$HOME/git/based-and-confused"
@@ -121,7 +121,7 @@ cd /scratch/iso
 sha256sum -c rhel-stig-lab-menu-team.iso.sha256
 ```
 
-The builder refuses an existing output or credential file. It writes one unique GUI password per `node2` in `/scratch/vms/menu-gui-credentials-team.json` (owner-only `0600`) and embeds **only password hashes** in the ISO. Store the JSON securely and share it separately via your approved secret manager. For a repeat build reusing that file, omit `--generate-credentials` and choose a **new** output filename. `--check-only` checks paths, key type, private credential file, and overwrite safety without creating or validating an ISO; omit `--generate-credentials` when using it.
+The builder refuses an existing output or credential file. It writes one unique GUI password per `node2` in `/scratch/vms/menu-gui-credentials-team.json` (owner-only `0600`) and embeds **only password hashes** in the ISO. Store the JSON securely and share it separately via your approved secret manager. For a repeat build reusing that file, omit `--generate-credentials` and choose a **new** output filename. `--check-only` checks paths, key type, private credential file, and overwrite safety without creating or validating an ISO; omit `--generate-credentials` when using it. The final postinstall grants **only `labadmin`** passwordless sudo; this is a deliberate STIG exception for disposable automation testing, not a compliant production baseline.
 
 Run the project tests on the clone:
 
@@ -136,7 +136,7 @@ PYTHONPATH=. python3 -m unittest discover -s tests -q
 
 **Manual walkthrough (virt-manager):** connect to `qemu:///system`, use `/scratch/iso/rhel-stig-lab-menu-team.iso` as the **only CD-ROM**, select network `stig-lab`, and attach a **fresh** 64 GiB or larger VirtIO disk under `/scratch/vms` as `/dev/vda`. Select `rhel10-node1` first if you want to test the embedded DVD without depending on the RHEL 8/9 HTTP trees. For GUI testing choose a `node2` entry and use its separately stored console password. An additional VM needs **both** `lab.ip=` and `lab.hostname=` changed to unused values at the boot menu (`e`, then Ctrl+X). See [README](README.md#install-in-virt-manager) for resources and the full node/IP map.
 
-**Optional Bash bootstrap (different credentials):** the env file is for the bootstrap only—it does **not** alter the menu ISO. This script defaults to the old local ISO filename, so set `LAB_ISO` to your freshly built ISO. It currently uses `/usr/bin/python3` and `/usr/sbin/virt-install`, and creates missing domains/disks only when you run `up` without `--dry-run`.
+**Optional Bash bootstrap (different credentials):** the env file is for the bootstrap only—it does **not** alter the menu ISO. This script defaults to this workstation's latest local ISO filename, so set `LAB_ISO` to your freshly built ISO on another host. It currently uses `/usr/bin/python3` and `/usr/sbin/virt-install`, and creates missing domains/disks only when you run `up` without `--dry-run`. When `LAB_USERNAME` is not `labadmin`, the final postinstall adds a separate key-only, locked-password `labadmin` with passwordless sudo; the configured user retains password-required sudo.
 
 ```sh
 cd "$HOME/git/based-and-confused"
@@ -155,10 +155,11 @@ The bootstrap's env parser expects raw `KEY=value` lines (no `export`, shell quo
 
 - If a RHEL 8/9 installer cannot fetch packages, confirm `stig-lab` is active, the container is healthy, and `.treeinfo`/BaseOS/AppStream are reachable at `http://192.168.150.1:8089/repo/rhel8` and `/rhel9`. Then check **guest** DHCP/firewall/bridge traffic. ISO creation alone does not populate those HTTP trees.
 - If `virt-install` or QEMU cannot access `/scratch` files, check system libvirt permissions and SELinux labeling on that host; do not disable its security controls.
-- The build checks media versions, embedded Kickstarts, menus, and boot metadata; it does **not** certify a completed installation, FIPS state, SSH access, or DISA compliance. Validate those in a disposable guest. RHEL 10.2's bundled `stig_gui` is labeled a Red Hat STIG profile, not verified against a later official DISA revision.
+- The build checks media versions, embedded Kickstarts, menus, and boot metadata; it does **not** certify a completed installation, FIPS state, SSH access, or DISA compliance. Validate those in a disposable guest, including SSH key login and `sudo -n id` as `labadmin`. Passwordless sudo is an explicit STIG finding, not compliance. RHEL 10.2's bundled `stig_gui` is labeled a Red Hat STIG profile, not verified against a later official DISA revision.
 
 ## Sources
 
 [1] https://developers.redhat.com/products/rhel/download — Red Hat Developer RHEL downloads
 [2] https://developers.redhat.com/products/rhel/8 — Red Hat Developer RHEL 8 downloads
 [3] https://access.redhat.com/downloads/content/rhel — Red Hat Customer Portal RHEL downloads
+[4] https://docs.podman.io/en/stable/markdown/podman-compose.1.html — Podman Compose reference
