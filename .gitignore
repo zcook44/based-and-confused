@@ -1,5 +1,8 @@
 # Operator secrets and generated credential-bearing Kickstarts
 lab-vms.env
+quarterly.env
+quarterly/private/
+quarterly/evidence/
 *.env.local
 data/menu-ks/*.ks
 
