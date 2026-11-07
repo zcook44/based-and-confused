@@ -1,5 +1,7 @@
 # Quarterly STIG evidence lab (feature branch)
 
+For the operator's ordered procedure—from network startup through per-host CKLB and ISSO review artifacts—use [QUARTERLY-WORKFLOW.md](QUARTERLY-WORKFLOW.md). This document records the implementation boundaries and validation evidence.
+
 **Status:** isolated lab configuration, private Kickstart rendering, direct-DVD install/full-copy clone **plans**, policy-to-tailoring generation, and signed-approval/scan-to-CKLB evidence gating are implemented. The CLI does **not** create, harden, clone, destroy, or scan a guest. No real RHEL installation, STIG Viewer import, or ISSO acceptance has been demonstrated. Do not send the generated CKLB to an ISSO as a validated production checklist until the gates below are satisfied.
 
 ## Isolation and safety
