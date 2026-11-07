@@ -1,30 +1,25 @@
-"""Quarterly STIG lab: safe plans and fail-closed, per-asset evidence release.
-
-This CLI never runs virt-install, defines a network, or deletes guest resources.
-"""
+"""Quarterly lab planning, cloning and hash-only asset handoff (no guest boot)."""
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import stat
 import subprocess
 import sys
-import tempfile
 
 from . import vm
-from .policy import PolicyError, X, _xml, load_policy, generate_tailoring
-from .cklb import EvidenceError, generate_cklb
 
 
-class ReleaseError(ValueError):
-    """Evidence/approval gate failure; nothing was published."""
+class LabError(ValueError):
+    """Invalid lab input; no handoff is published."""
 
 
 _REQUIRED_CREDENTIALS = frozenset({'QUARTERLY_USERNAME', 'QUARTERLY_PASSWORD',
                                    'QUARTERLY_ROOT_PASSWORD', 'QUARTERLY_LABADMIN_PUBLIC_KEY'})
+_CANONICAL_MANIFEST = Path(__file__).resolve().with_name('lab.json')
 
 
 def load_credentials(path):
@@ -32,88 +27,37 @@ def load_credentials(path):
     path = Path(path)
     if (path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid()
             or path.stat().st_mode & 0o077):
-        raise ReleaseError('private credentials file must be owned and mode 0600')
+        raise LabError('private credentials file must be owned and mode 0600')
     try:
         lines = path.read_text(encoding='utf-8').splitlines()
     except (OSError, UnicodeError) as exc:
-        raise ReleaseError('unable to read private credentials') from exc
+        raise LabError('unable to read private credentials') from exc
     result = {}
     for line in lines:
         if not line or line.lstrip().startswith('#'):
             continue
         key, sep, value = line.partition('=')
         if not sep or key not in _REQUIRED_CREDENTIALS or key in result or not value or '\x00' in value:
-            raise ReleaseError('invalid, duplicate or unknown credential entry')
+            raise LabError('invalid, duplicate or unknown credential entry')
         result[key] = value
     if result.keys() != _REQUIRED_CREDENTIALS:
-        raise ReleaseError('missing credential entry')
+        raise LabError('missing credential entry')
     return result
 
 
 def hash_password(password):
     """SHA512-crypt through stdin; plaintext is never placed in argv or logs."""
     if not password or '\n' in password or '\x00' in password:
-        raise ReleaseError('invalid password input')
+        raise LabError('invalid password input')
     try:
         proc = subprocess.run(['openssl', 'passwd', '-6', '-stdin'], input=password + '\n',
                               capture_output=True, text=True, timeout=20, check=True)
         hashed = proc.stdout.strip()
         if not hashed.startswith('$6$'):
-            raise ReleaseError('unexpected password hash output')
+            raise LabError('unexpected password hash output')
         return hashed
     except (OSError, subprocess.SubprocessError) as exc:
-        raise ReleaseError('password hashing unavailable') from exc
-
-
-def digest_file(path):
-    digest = hashlib.sha256()
-    with Path(path).open('rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def verify_approvals(exceptions, policy, benchmark, ledger, signature, trusted_key):
-    """Check detached signature and bind every exception to exact policy/benchmark.
-
-    Trust in the public key's owner must be established out of band by the ISSO.
-    """
-    try:
-        ledger_bytes = Path(ledger).read_bytes()
-        # OpenSSL requires paths for the signature and key; pin their exact bytes
-        # in a private directory so a later replacement of either path is inert.
-        with tempfile.TemporaryDirectory(prefix='quarterly-approval-') as td:
-            key_copy = Path(td) / 'trusted.pub'
-            signature_copy = Path(td) / 'approval.sig'
-            _create_private(key_copy, Path(trusted_key).read_bytes())
-            _create_private(signature_copy, Path(signature).read_bytes())
-            result = subprocess.run(['openssl', 'dgst', '-sha256', '-verify', str(key_copy),
-                                     '-signature', str(signature_copy)],
-                                    input=ledger_bytes, capture_output=True, timeout=20)
-        if result.returncode or result.stdout.strip() != b'Verified OK':
-            raise ReleaseError('approval ledger signature failed verification')
-        data = json.loads(ledger_bytes.decode('utf-8'))
-        if (data.get('schema') != 1 or data.get('policy_sha256') != digest_file(policy)
-                or data.get('benchmark_sha256') != digest_file(benchmark)):
-            raise ReleaseError('signed ledger is not bound to the exact policy and benchmark files')
-        entries = data.get('approvals')
-        if not isinstance(entries, list):
-            raise ReleaseError('signed approval list missing')
-        indexed = {}
-        for entry in entries:
-            identifier = entry.get('approval_id')
-            if not identifier or identifier in indexed:
-                raise ReleaseError('missing or duplicate approval ID')
-            indexed[identifier] = entry
-        for item in exceptions:
-            entry = indexed.get(item['approval_id'])
-            if entry is None or any(entry.get(k) != item[k] for k in ('rule_id', 'approver', 'disposition', 'expires')):
-                raise ReleaseError('signed approval does not match policy exception')
-        return hashlib.sha256(ledger_bytes).hexdigest()
-    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, KeyError, TypeError) as exc:
-        if isinstance(exc, ReleaseError):
-            raise
-        raise ReleaseError('approval verification could not complete') from exc
+        raise LabError('password hashing unavailable') from exc
 
 
 def _create_private(path, data):
@@ -129,119 +73,129 @@ def _create_private(path, data):
         raise
 
 
-_RELEASE_INPUTS = ('policy', 'benchmark', 'pre', 'post', 'coverage', 'tailoring',
-                   'schema', 'approval_ledger', 'approval_signature', 'trusted_key')
-
-
-def _snapshot_inputs(args, directory):
-    """Capture release inputs once in an owner-only directory before any gates."""
-    paths = {}
-    for name in _RELEASE_INPUTS:
-        source = getattr(args, name)
-        try:
-            fd = os.open(source, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-            with os.fdopen(fd, 'rb') as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                    raise ReleaseError('invalid release input')
-                content = stream.read()
-            target = Path(directory) / (name + source.suffix)
-            _create_private(target, content)
-            paths[name] = target
-        except OSError as exc:
-            raise ReleaseError('unable to snapshot release input') from exc
-    return paths
-
-
-def write_evidence(destination, host, cklb, inputs, metadata):
-    """Create a new, owner-only evidence directory; never replace existing output."""
-    root = Path(destination)
-    if not host or '/' in host or host in ('.', '..') or not all(c.isalnum() or c in '-._' for c in host):
-        raise ReleaseError('invalid asset hostname')
-    if root.exists() or root.is_symlink():
-        raise ReleaseError('evidence destination exists: choose a new run directory')
-    if not root.parent.is_dir() or root.parent.is_symlink() or root.parent.stat().st_mode & 0o022:
-        raise ReleaseError('evidence parent must exist, not be a symlink and not be group/world writable')
-    sources = {}
-    for name, source in sorted(inputs.items()):
-        path = Path(source)
-        if not name.isidentifier() or not path.is_file() or path.is_symlink():
-            raise ReleaseError('invalid evidence source')
-        sources[name] = (path.suffix, path.read_bytes())
-    root.mkdir(mode=0o700)
+def _hash_regular(path, *, immutable=False):
+    """Hash an owner-private regular file through a no-follow descriptor."""
+    path = Path(path)
+    parent_fd = vm._open_directory_without_symlinks(path.parent)
     try:
-        records = {}
-        for name, (suffix, content) in sources.items():
-            copy = root / (name + suffix)
-            _create_private(copy, content)
-            records[name] = {'file': copy.name, 'sha256': digest_file(copy)}
-        checklist = root / (host + '.cklb')
-        _create_private(checklist, (json.dumps(cklb, indent=2, sort_keys=True) + '\n').encode())
-        manifest = {'host': host, 'cklb': {'file': checklist.name, 'sha256': digest_file(checklist)},
-                    'inputs': records, 'metadata': metadata,
-                    'created_utc': datetime.now(timezone.utc).isoformat(),
-                    'review_state': 'pending ISSO STIG Viewer import and signed per-asset acceptance'}
-        _create_private(root / 'manifest.json', (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode())
-        return checklist
-    except BaseException:
-        # Never purge a partial evidence directory: preserve it for forensic inspection.
-        raise
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o077 or (immutable and info.st_mode & 0o222)):
+                raise LabError('input must be an owner-private regular file; sealed base must be read-only')
+            if immutable:
+                try:
+                    inspected = subprocess.run(
+                        ['qemu-img', 'info', '--output=json', f'/proc/self/fd/{fd}'],
+                        check=True, capture_output=True, text=True, timeout=20,
+                        pass_fds=(fd,))
+                    image_info = json.loads(inspected.stdout)
+                except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                    raise LabError('cannot inspect baseline qcow2') from exc
+                if not vm._standalone_qcow2(image_info):
+                    raise LabError('baseline must be standalone qcow2 without snapshots or external dependencies')
+            digest = hashlib.sha256()
+            with os.fdopen(fd, 'rb', closefd=False) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
 
 
-def _release_cklb(args, paths):
-    """Validate and publish from the same private snapshot, not mutable sources."""
-    policy = load_policy(paths['policy'])
-    lab = vm.load_manifest(args.manifest)
-    matching = [n for n in lab['nodes'] if args.host in (n['name'], n['fqdn'])]
-    if len(matching) != 1 or args.host != matching[0]['fqdn']:
-        raise ReleaseError('host must match an exact manifest FQDN')
-    signed = verify_approvals(policy.get('exceptions', []), paths['policy'], paths['benchmark'],
-                              paths['approval_ledger'], paths['approval_signature'], paths['trusted_key'])
-    tailoring_root = _xml(paths['tailoring'])
-    hrefs = tailoring_root.findall(f'{{{X}}}benchmark')
-    href = hrefs[0].get('href') if len(hrefs) == 1 else None
-    if not href or Path(href).name != args.benchmark.name:
-        raise ReleaseError('tailoring benchmark reference differs from pinned input')
-    from xml.etree import ElementTree as ET
-    expected = _xml(generate_tailoring(policy, paths['benchmark'], href))
-    if ET.canonicalize(ET.tostring(tailoring_root, encoding='unicode'), strip_text=True) != ET.canonicalize(ET.tostring(expected, encoding='unicode'), strip_text=True):
-        raise ReleaseError('tailoring differs from master policy')
-    # The untailored coverage scan determines every rule; a tailored post-scan
-    # remains separately retained for comparison and human review.
-    doc = generate_cklb(policy, paths['benchmark'], paths['coverage'], args.host,
-                        require_full_coverage=True, scan_profile=policy['profile_id'],
-                        schema_path=paths['schema'])
-    generate_cklb(policy, paths['benchmark'], paths['pre'], args.host,
-                  require_full_coverage=True, scan_profile=policy['profile_id'],
-                  max_age_hours=72)
-    post_doc = generate_cklb(policy, paths['benchmark'], paths['post'], args.host)
-    post_root = _xml(paths['post'])
-    post_result = post_root.find(f'{{{X}}}TestResult')
-    if post_result is None:
-        raise ReleaseError('tailored post-scan has no TestResult')
-    post_ids = {item.get('idref') for item in post_result.findall(f'{{{X}}}rule-result')}
-    coverage_rules = {r['rule_id_src']: r['status'] for r in doc['stigs'][0]['rules']}
-    required_post = {rid for rid in coverage_rules if policy.get('selections', {}).get(rid) is not False}
-    if required_post - post_ids:
-        raise ReleaseError('selected post-scan rule missing: ' + ', '.join(sorted(required_post - post_ids)))
-    for rule in post_doc['stigs'][0]['rules']:
-        rid, observed = rule['rule_id_src'], rule['status']
-        if rid in required_post and coverage_rules[rid] != observed:
-            raise ReleaseError('tailored post-scan disagrees with coverage scan: ' + rid)
-    def scan_end(path):
-        result = _xml(path).find(f'{{{X}}}TestResult')
-        if result is None:
-            raise ReleaseError('scan has no TestResult')
-        return datetime.fromisoformat(result.attrib['end-time'].replace('Z', '+00:00'))
-    if not scan_end(paths['pre']) < scan_end(paths['post']) <= scan_end(paths['coverage']):
-        raise ReleaseError('scan chronology must be pre < post <= coverage')
-    metadata = {'approval_ledger_sha256': signed, 'schema_sha256': digest_file(paths['schema']),
-                'trusted_key_sha256': digest_file(paths['trusted_key']),
-                'review_state': 'unsigned: pending independent ISSO signoff'}
-    return write_evidence(args.evidence_dir, args.host, doc, paths, metadata)
+def _lab_commit(*, manifest_bytes=None, git_run=subprocess.run):
+    """Identify HEAD only when this repository has no tracked or untracked changes."""
+    repo = Path(__file__).resolve().parents[1]
+    env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+    def run(*args):
+        return git_run(['git', '-C', str(repo), *args], env=env,
+                       capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+    commit = run('rev-parse', '--verify', 'HEAD')
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise LabError('cannot identify lab commit')
+    if run('status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'):
+        raise LabError('lab worktree is dirty; review and commit changes before handoff')
+    if manifest_bytes is not None:
+        committed = git_run(['git', '-C', str(repo), 'show', f'{commit}:quarterly/lab.json'],
+                            env=env, capture_output=True, check=True, timeout=20).stdout
+        if committed != manifest_bytes:
+            raise LabError('canonical manifest bytes differ from committed HEAD')
+    return commit
+
+
+def _load_asset_manifest(path):
+    """Read the exact tracked manifest through a no-follow descriptor."""
+    if os.path.abspath(path) != str(_CANONICAL_MANIFEST):
+        raise LabError('asset-record requires canonical quarterly/lab.json')
+    parent_fd = vm._open_directory_without_symlinks(_CANONICAL_MANIFEST.parent)
+    try:
+        fd = os.open(_CANONICAL_MANIFEST.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise LabError('canonical manifest must be a regular file')
+            with os.fdopen(fd, 'rb', closefd=False) as source:
+                data = source.read()
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    commit = _lab_commit(manifest_bytes=data)
+    return vm.validate_manifest(json.loads(data)), commit
+
+
+def export_asset_record(lab, node_name, cycle_id, base_sha256, pre, out, *, commit=None):
+    """Export manifest identity and checked file digests, never scan/guest contents."""
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', cycle_id):
+        raise LabError('cycle-id must be a nonempty identifier')
+    if not re.fullmatch(r'[0-9a-f]{64}', base_sha256):
+        raise LabError('expected lowercase base SHA-256 required')
+    node = next((n for n in lab['nodes'] if n['name'] == node_name), None)
+    if node is None or node['image_kind'] != 'clean':
+        raise LabError('unknown clean node')
+    base = Path(node['base_disk'])
+    root = Path(lab['disk_root'])
+    if (base != root / 'bases' / (node_name + '-baseline.qcow2')
+            or base != Path(lab['releases'][node['release']][vm.BASE_KEYS[node['role']]])):
+        raise LabError('base is not the selected node-owned baseline')
+    if _hash_regular(base, immutable=True) != base_sha256:
+        raise LabError('base SHA-256 mismatch')
+    pre_sha256 = _hash_regular(pre)
+    if commit is None:
+        commit = _lab_commit()
+    record = {'schema_version': 1, 'cycle_id': cycle_id, 'asset_fqdn': node['fqdn'],
+              'os_release': lab['releases'][node['release']]['os_variant'],
+              'role': node['role'], 'baseline_state': 'clean',
+              'baseline_sha256': base_sha256, 'pre_scan_sha256': pre_sha256,
+              'lab_commit': commit}
+    destination = Path(out)
+    parent_fd = vm._open_directory_without_symlinks(destination.parent)
+    try:
+        parent = os.fstat(parent_fd)
+        if parent.st_uid != os.getuid() or parent.st_mode & 0o077:
+            raise LabError('output parent must be owned and private (0700)')
+        fd = os.open(destination.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=parent_fd)
+        try:
+            with os.fdopen(fd, 'wb', closefd=False) as stream:
+                stream.write((json.dumps(record, indent=2) + '\n').encode())
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            os.unlink(destination.name, dir_fd=parent_fd)
+            raise
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+    return destination
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Isolated quarterly RHEL STIG lab and evidence')
+    parser = argparse.ArgumentParser(description='Isolated quarterly RHEL lab and asset handoff')
     parser.add_argument('--manifest', type=Path, default=vm.MANIFEST)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('inventory')
@@ -263,14 +217,12 @@ def main(argv=None):
     create_clone.add_argument('--node', required=True)
     create_clone.add_argument('--base-sha256', required=True)
     create_clone.add_argument('--confirm', required=True)
-    tailor = sub.add_parser('tailor')
-    tailor.add_argument('--policy', type=Path, required=True)
-    tailor.add_argument('--benchmark', type=Path, required=True)
-    tailor.add_argument('--benchmark-href', required=True)
-    tailor.add_argument('--out', type=Path, required=True)
-    evidence = sub.add_parser('cklb')
-    for arg in ('policy', 'benchmark', 'pre', 'post', 'coverage', 'tailoring', 'schema', 'approval-ledger', 'approval-signature', 'trusted-key', 'evidence-dir', 'host'):
-        evidence.add_argument('--' + arg, required=True, type=str if arg == 'host' else Path)
+    handoff = sub.add_parser('asset-record', help='hash owner-private qcow2 and pre-scan; export private JSON (manual seal/assessment required)')
+    handoff.add_argument('--node', required=True)
+    handoff.add_argument('--cycle-id', required=True)
+    handoff.add_argument('--base-sha256', required=True)
+    handoff.add_argument('--pre', type=Path, required=True)
+    handoff.add_argument('--out', type=Path, required=True)
     try:
         args = parser.parse_args(argv)
         if args.command == 'inventory':
@@ -280,7 +232,7 @@ def main(argv=None):
         elif args.command == 'preflight':
             problems = vm.preflight(vm.load_manifest(args.manifest))
             if problems:
-                raise ReleaseError('; '.join(problems))
+                raise LabError('; '.join(problems))
             print('Preflight: no currently detectable route/network/domain/clone-disk collision')
         elif args.command == 'kickstart':
             env = load_credentials(args.env)
@@ -305,17 +257,12 @@ def main(argv=None):
             path = vm.execute_clone(vm.load_manifest(args.manifest), args.node,
                                     base_sha256=args.base_sha256, confirm=args.confirm)
             print(path)
-        elif args.command == 'tailor':
-            policy = load_policy(args.policy)
-            xml = generate_tailoring(policy, args.benchmark, args.benchmark_href)
-            _create_private(args.out, xml.encode())
-            print(args.out)
-        elif args.command == 'cklb':
-            with tempfile.TemporaryDirectory(prefix='quarterly-input-') as td:
-                paths = _snapshot_inputs(args, td)
-                print(_release_cklb(args, paths))
+        elif args.command == 'asset-record':
+            lab, commit = _load_asset_manifest(args.manifest)
+            print(export_asset_record(lab, args.node, args.cycle_id, args.base_sha256,
+                                      args.pre, args.out, commit=commit))
         return 0
-    except (ReleaseError, PolicyError, EvidenceError, vm.PreflightError, OSError, ValueError,
+    except (LabError, vm.PreflightError, OSError, ValueError,
             subprocess.SubprocessError) as exc:
         print(f'quarterly: {exc}', file=sys.stderr)
         return 2

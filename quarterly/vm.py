@@ -20,7 +20,11 @@ BUILD_KEYS = {'gui': 'gui_build_disk', 'controller': 'controller_build_disk', 'n
 
 def load_manifest(path=MANIFEST):
     """Load and validate the canonical isolated lab identity and path map."""
-    lab = json.loads(Path(path).read_text())
+    return validate_manifest(json.loads(Path(path).read_text()))
+
+
+def validate_manifest(lab):
+    """Validate already-read manifest bytes without reopening a path."""
     if lab['schema'] != 1:
         raise ValueError('unknown lab manifest schema')
     net = lab['network']

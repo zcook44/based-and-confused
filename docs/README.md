@@ -1,4 +1,10 @@
-# RHEL STIG pipeline lab
+# RHEL STIG lab
+
+## Repository boundaries
+
+This repository contains the existing menu-ISO/Bash installer lab and the separate quarterly clean-baseline lab. For the existing installer lab, use this guide and [QUICKSTART.md](QUICKSTART.md). For the quarterly node-specific clean image, safe plans, clone and hash-only asset-record handoff, use [QUARTERLY-LAB.md](QUARTERLY-LAB.md) and [QUARTERLY-WORKFLOW.md](QUARTERLY-WORKFLOW.md). Seal and assessment evidence must be verified separately. Optional offline identity-generalization scripts are described in [QUARTERLY-SYSPREP.md](QUARTERLY-SYSPREP.md) and [QUARTERLY-PERSONALIZE.md](QUARTERLY-PERSONALIZE.md).
+
+Policy, tailoring, remediation/assessment coordination, approvals, CKLB conversion and release belong to the separate [private burden-of-proof repository](https://github.com/zcook44/burden-of-proof), not this lab. Do not treat either lab's synthetic tests or asset handoff as compliance acceptance.
 
 Eight disposable VMs on one libvirt network, built from the RHEL 8.10, 9.8, and 10.2 DVDs. Use them to develop Ansible automation against a STIG-oriented starting point. Nothing in this repo creates a VM until you run `./lab-vms.sh up ...` or create one in virt-manager.
 
