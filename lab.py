@@ -19,6 +19,7 @@ def render_kickstart(version: str, disk: str, key: str) -> str:
     key = key.strip()
     if not re.fullmatch(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+(?: [A-Za-z0-9@._+-]+)?', key):
         raise ValueError('expected one SSH public key (no newlines or quotes)')
+    ansible_bindings = 'python3-dnf\npython3-libselinux\n' if version in ('9', '10') else ''
     hardening = (f'''%addon com_redhat_oscap
 content-type = scap-security-guide
 profile = {PROFILE}
@@ -70,7 +71,9 @@ openscap-utils
 aide
 audit
 chrony
-sudo
+openssh-server
+{'python3.11' if version == '8' else 'python3'}
+{ansible_bindings}sudo
 shadow-utils
 %end
 {hardening}

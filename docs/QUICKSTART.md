@@ -2,6 +2,8 @@
 
 This gets a **new x86_64 Linux host** from a Git clone to a bootable, eight-entry Kickstart menu ISO, then to a first disposable VM. It does **not** create VMs while building the ISO. The lab uses RHEL 8.10 (two test nodes), 9.8 (three nodes), and 10.2 (three nodes); each `node2` is the GUI/STIG-GUI role.
 
+**Scope:** this is the **eight-entry menu-ISO** walkthrough. `lab-vms.sh` also manages two RHEL 7.9 nodes directly from their full DVD, for ten possible Bash-bootstrap targets; see [RHEL 7 nodes](RHEL7-NODES.md). For fresh-install Python/package prerequisites and their Ansible limits, see [Kickstart dependencies](ANSIBLE-KICKSTART-DEPENDENCIES.md). The separate [quarterly workflow](QUARTERLY-WORKFLOW.md) does not use this menu ISO. A plan is not a boot test; the installer remains regrettably literal about disks.
+
 > **Disk warning:** Every Kickstart clears `/dev/vda`. Attach only a **new, disposable VirtIO disk** to each VM. The script will not overwrite an existing ISO; a `--check-only` or `--dry-run` is *not* an installation.
 
 ## 1. Prepare the host and clone
@@ -136,7 +138,7 @@ PYTHONPATH=. python3 -m unittest discover -s tests -q
 
 **Manual walkthrough (virt-manager):** connect to `qemu:///system`, use `/scratch/iso/rhel-stig-lab-menu-team.iso` as the **only CD-ROM**, select network `stig-lab`, and attach a **fresh** 64 GiB or larger VirtIO disk under `/scratch/vms` as `/dev/vda`. Select `rhel10-node1` first if you want to test the embedded DVD without depending on the RHEL 8/9 HTTP trees. For GUI testing choose a `node2` entry and use its separately stored console password. An additional VM needs **both** `lab.ip=` and `lab.hostname=` changed to unused values at the boot menu (`e`, then Ctrl+X). See [README](README.md#install-in-virt-manager) for resources and the full node/IP map.
 
-**Optional Bash bootstrap (different credentials):** the env file is for the bootstrap only—it does **not** alter the menu ISO. This script defaults to this workstation's latest local ISO filename, so set `LAB_ISO` to your freshly built ISO on another host. It currently uses `/usr/bin/python3` and `/usr/sbin/virt-install`, and creates missing domains/disks only when you run `up` without `--dry-run`. When `LAB_USERNAME` is not `labadmin`, the final postinstall adds a separate key-only, locked-password `labadmin` with passwordless sudo; the configured user retains password-required sudo.
+**Optional Bash bootstrap (different credentials):** the env file is for the bootstrap only—it does **not** alter the menu ISO. For RHEL 8/9/10 this script defaults to this workstation's existing local ISO filename, so set `LAB_ISO` to your freshly built ISO on another host. RHEL 7 uses `LAB_RHEL7_ISO` and the full DVD **directly**, not that ISO or an HTTP tree. It currently uses `/usr/bin/python3` and `/usr/sbin/virt-install`, and creates missing domains/disks only when you run `up` without `--dry-run`. When `LAB_USERNAME` is not `labadmin`, the final postinstall adds a separate key-only, locked-password `labadmin` with passwordless sudo; the configured user retains password-required sudo. `up all` now targets **ten** nodes and requires the RHEL 7 media and public key; use selected node names if you prepared only the menu media.
 
 ```sh
 cd "$HOME/git/based-and-confused"
@@ -156,6 +158,7 @@ The bootstrap's env parser expects raw `KEY=value` lines (no `export`, shell quo
 - If a RHEL 8/9 installer cannot fetch packages, confirm `stig-lab` is active, the container is healthy, and `.treeinfo`/BaseOS/AppStream are reachable at `http://192.168.150.1:8089/repo/rhel8` and `/rhel9`. Then check **guest** DHCP/firewall/bridge traffic. ISO creation alone does not populate those HTTP trees.
 - If `virt-install` or QEMU cannot access `/scratch` files, check system libvirt permissions and SELinux labeling on that host; do not disable its security controls.
 - The build checks media versions, embedded Kickstarts, menus, and boot metadata; it does **not** certify a completed installation, FIPS state, SSH access, or DISA compliance. Validate those in a disposable guest, including SSH key login and `sudo -n id` as `labadmin`. Passwordless sudo is an explicit STIG finding, not compliance. RHEL 10.2's bundled `stig_gui` is labeled a Red Hat STIG profile, not verified against a later official DISA revision.
+- Updated Kickstart **source** packages do not update a previously built menu ISO or an installed guest. Treat a RHEL 8 `node2` rebuild as unverified until installer, login, FIPS/SELinux, selected Python interpreter and representative Ansible modules are checked on that rebuilt guest; see [Kickstart dependencies](ANSIBLE-KICKSTART-DEPENDENCIES.md).
 
 ## Sources
 

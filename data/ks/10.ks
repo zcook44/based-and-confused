@@ -35,6 +35,12 @@ openscap-utils
 aide
 audit
 chrony
+sudo
+shadow-utils
+openssh-server
+python3
+python3-dnf
+python3-libselinux
 %end
 # RHEL 10 removed oscap-anaconda-addon. This is post-install remediation,
 # not equivalent to a vendor-generated, reviewed install-time STIG Kickstart.

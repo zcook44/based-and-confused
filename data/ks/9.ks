@@ -35,6 +35,12 @@ openscap-utils
 aide
 audit
 chrony
+sudo
+shadow-utils
+openssh-server
+python3
+python3-dnf
+python3-libselinux
 %end
 %addon com_redhat_oscap
 content-type = scap-security-guide

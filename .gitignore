@@ -12,3 +12,6 @@ __pycache__/
 *.iso
 *.qcow2
 *.partial
+
+# Owner-private live lab OpenSCAP assessments (not Git evidence releases)
+lab_results/

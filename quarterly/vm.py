@@ -170,9 +170,12 @@ def render_kickstart(lab, node_name, *, username, password_hash, root_password_h
     if fips is not True:
         raise ValueError('FIPS must be explicitly enabled for installer and installed guest')
     graphical = node['role'] in ('controller', 'gui')
-    packages = (['@^graphical-server-environment'] if graphical else ['@^minimal-environment']) + ['openscap-scanner', 'scap-security-guide', 'sudo', 'shadow-utils']
+    python_package = 'python3.11' if node['release'] == 'rhel8' else 'python3'
+    packages = (['@^graphical-server-environment'] if graphical else ['@^minimal-environment']) + ['openscap-scanner', 'scap-security-guide', 'sudo', 'shadow-utils', 'openssh-server', python_package]
+    if node['release'] != 'rhel8':
+        packages += ['python3-dnf', 'python3-libselinux']
     if node['role'] == 'controller':
-        packages += ['git', 'python3']
+        packages += ['git', 'openssh-clients']
     if node['role'] not in ('controller', 'node', 'gui'):
         raise ValueError('unknown role')
     network = lab['network']

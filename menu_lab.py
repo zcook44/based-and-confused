@@ -51,7 +51,7 @@ def render_node(node: Node, key: str, gui_password_hash: str | None = None) -> s
         ks = ks.replace('user --name=labadmin --groups=wheel --lock',
                         f'user --name=labadmin --groups=wheel --iscrypted --password="{gui_password_hash}"', 1)
     if node.role == 'rheladm':
-        ks = ks.replace('shadow-utils\n%end', 'shadow-utils\nansible-core\n%end', 1)
+        ks = ks.replace('shadow-utils\n%end', 'shadow-utils\nopenssh-clients\nansible-core\n%end', 1)
     if node.role == 'node2':
         ks = ks.replace('@^minimal-environment', '@^graphical-server-environment', 1)
         ks = ks.replace('xccdf_org.ssgproject.content_profile_stig',

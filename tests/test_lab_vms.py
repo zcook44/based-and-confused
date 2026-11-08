@@ -10,6 +10,7 @@ NAMES = (
     'rhel9-rheladm', 'rhel9-node1', 'rhel9-node2',
     'rhel10-rheladm', 'rhel10-node1', 'rhel10-node2',
     'rhel8-node1', 'rhel8-node2',
+    'rhel7-node1', 'rhel7-node2',
 )
 
 
@@ -31,6 +32,9 @@ case "$1" in
 esac
 ''')
             virsh.chmod(0o755)
+            curl = bin_dir / 'curl'
+            curl.write_text('#!/bin/sh\nexit 1\n')
+            curl.chmod(0o755)
             env_file = root / 'lab-vms.env'
             env_file.write_text(f'LAB_USERNAME={username}\nLAB_PASSWORD=TestUserPassphrase123!\nLAB_ROOT_PASSWORD=TestRootPassphrase456!\n')
             env_file.chmod(env_mode)
@@ -50,14 +54,14 @@ esac
             rendered = {p.name: p.read_text() for p in (root / 'vms').rglob('*.ks')} if (root / 'vms').exists() else {}
             return result, calls, created, rendered
 
-    def test_up_all_dry_run_plans_eight_distinct_automatic_installs_without_writes(self):
+    def test_up_all_dry_run_plans_ten_distinct_automatic_installs_without_writes(self):
         result, calls, created, rendered = self.run_lab('--dry-run', 'up', 'all')
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in NAMES:
             self.assertIn(f'--name {name}', result.stdout)
             self.assertIn(f'inst.ks=file:/{name}.ks', result.stdout)
             self.assertIn(name + '.qcow2', result.stdout)
-        self.assertEqual(result.stdout.count('virt-install --connect'), 8)
+        self.assertEqual(result.stdout.count('virt-install --connect'), 10)
         self.assertNotIn('--name rhel8-rheladm', result.stdout)
         self.assertIn('inst.repo=http://192.168.150.1:8089/repo/rhel8', result.stdout)
         self.assertIn('inst.repo=http://192.168.150.1:8089/repo/rhel9', result.stdout)
@@ -117,6 +121,39 @@ esac
         self.assertIn('not defined', result.stderr)
         self.assertEqual(calls, '')
         self.assertEqual(created, [])
+
+    def test_rhel7_direct_dvd_plan_and_private_gui_kickstart(self):
+        result, calls, created, rendered = self.run_lab('--dry-run', 'up', 'rhel7-node1', 'rhel7-node2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rhel-7.9-x86_64-dvd.iso', result.stdout)
+        self.assertIn('inst.stage2=hd:LABEL=RHEL-7.9', result.stdout)
+        self.assertIn('--boot hd', result.stdout)
+        self.assertIn('lab.ip=192.168.150.131', result.stdout)
+        self.assertIn('lab.ip=192.168.150.132', result.stdout)
+        self.assertNotIn('repo/rhel7', result.stdout)
+        self.assertEqual(created, [])
+        result, calls, created, rendered = self.run_lab('prepare', 'rhel7-node2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ks = rendered['rhel7-node2.ks']
+        self.assertIn('user --name=autolab --groups=wheel --iscrypted --password="$6$', ks)
+        self.assertIn('rootpw --iscrypted "$6$', ks)
+        self.assertIn('LAB_ACCOUNT=autolab', ks)
+        self.assertIn('useradd --create-home --shell /bin/bash labadmin', ks)
+        self.assertIn('labadmin ALL=(ALL) NOPASSWD: ALL', ks)
+        self.assertNotIn('autolab ALL=(ALL) NOPASSWD', ks)
+        self.assertIn('selected="false"', ks)
+        self.assertNotIn('TestUserPassphrase123!', ks)
+
+    def test_rhel7_dvd_does_not_depend_on_http_repository(self):
+        result, calls, created, rendered = self.run_lab('up', 'rhel7-node1', existing='rhel7-node1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('start rhel7-node1', calls)
+
+    def test_rhel7_status_does_not_require_env_or_media(self):
+        result, calls, created, rendered = self.run_lab('status', 'rhel7-node1', 'rhel7-node2')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('rhel7-node1', result.stdout)
+        self.assertIn('shut off', result.stdout)
 
 
 if __name__ == '__main__':

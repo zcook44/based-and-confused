@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Provision or power-manage the eight disposable RHEL STIG pipeline lab VMs.
+# Provision or power-manage the ten disposable RHEL STIG pipeline lab VMs.
 set +x # never trace passwords supplied by the operator's env file
 set -euo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ISO="${LAB_ISO:-/scratch/iso/rhel-stig-lab-menu-8.10-9.8-10.2-labadmin-sudo-final.iso}"
+readonly RHEL7_ISO="${LAB_RHEL7_ISO:-/scratch/iso/rhel-7.9-x86_64-dvd.iso}"
+readonly RHEL7_KEY="${LAB_RHEL7_SSH_KEY:-${HOME}/.ssh/id_ecdsa.pub}"
 readonly VM_DIR="${LAB_VM_DIR:-/scratch/vms}"
 readonly KERNEL_DIR="${LAB_KERNEL_DIR:-${VM_DIR}/.installer-kernels-8.10-9.8-10.2}"
+readonly RHEL7_KERNEL_DIR="${LAB_RHEL7_KERNEL_DIR:-${VM_DIR}/.installer-kernels-7.9}"
 readonly ENV_FILE="${LAB_ENV_FILE:-${SCRIPT_DIR}/lab-vms.env}"
 readonly HOST_REPO='http://192.168.150.1:8089/repo'
 readonly LABEL='RHEL-10-2-BaseOS-x86_64'
-readonly -a ALL_NODES=(rhel9-rheladm rhel9-node1 rhel9-node2 rhel10-rheladm rhel10-node1 rhel10-node2 rhel8-node1 rhel8-node2)
+readonly -a ALL_NODES=(rhel9-rheladm rhel9-node1 rhel9-node2 rhel10-rheladm rhel10-node1 rhel10-node2 rhel8-node1 rhel8-node2 rhel7-node1 rhel7-node2)
 readonly -a VIRT_INSTALL=(/usr/bin/python3 /usr/sbin/virt-install)
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -24,7 +27,9 @@ Usage: lab-vms.sh [--dry-run] <up|prepare|start|stop|status> <all|node...>
   stop     Request graceful shutdown; never delete VMs or disks.
   status   Show each selected VM's current libvirt state.
   --dry-run  Show the exact VM commands without writing disks or starting VMs.
-Nodes: rhel8-node1 rhel8-node2 rhel9-rheladm rhel9-node1 rhel9-node2 rhel10-rheladm rhel10-node1 rhel10-node2
+Nodes: rhel7-node1 rhel7-node2 rhel8-node1 rhel8-node2 rhel9-rheladm rhel9-node1 rhel9-node2 rhel10-rheladm rhel10-node1 rhel10-node2
+RHEL 7 uses LAB_RHEL7_ISO (full DVD) and LAB_RHEL7_SSH_KEY (ECDSA/RSA .pub).
+See docs/RHEL7-NODES.md for the GUI exception and post-install checks.
 Set LAB_ENV_FILE to an owner-only (0600) environment file; default: ./lab-vms.env.
 HELP
 }
@@ -32,6 +37,8 @@ HELP
 lookup_node() {
   local name=$1
   case "$name" in
+    rhel7-node1)   version=7; role=node1; ip=192.168.150.131 ;;
+    rhel7-node2)   version=7; role=node2; ip=192.168.150.132 ;;
     rhel8-node1)   version=8; role=node1; ip=192.168.150.121 ;;
     rhel8-node2)   version=8; role=node2; ip=192.168.150.122 ;;
     rhel9-rheladm)  version=9; role=rheladm; ip=192.168.150.101 ;;
@@ -85,7 +92,11 @@ prepare_ks() {
   mkdir -p -- "$VM_DIR"
   base=$(mktemp "$VM_DIR/.base-$name-XXXXXX")
   tmp=$(mktemp "$VM_DIR/.new-$name-XXXXXX")
-  if ! xorriso -osirrox on -indev "$ISO" -extract "/ks/$name.ks" "$base" >/dev/null 2>&1; then
+  if [[ $version == 7 ]]; then
+    rm -- "$base"
+    python3 "$SCRIPT_DIR/rhel7_lab.py" --node "$name" --ssh-key "$RHEL7_KEY" --out "$base" ||
+      die "Unable to render RHEL 7 Kickstart for $name"
+  elif ! xorriso -osirrox on -indev "$ISO" -extract "/ks/$name.ks" "$base" >/dev/null 2>&1; then
     rm -f -- "$base" "$tmp"
     die "Unable to read embedded Kickstart for $name from $ISO"
   fi
@@ -103,6 +114,9 @@ prepare_ks() {
       'sshkey --username=labadmin '* )
         printf '%s\n' "${line/--username=labadmin/--username=$username}" >> "$tmp"
         ((key_count+=1)) ;;
+      'LAB_ACCOUNT=labadmin')
+        printf 'LAB_ACCOUNT=%s\n' "$username" >> "$tmp"
+        ((key_count+=1)) ;;
       *) printf '%s\n' "$line" >> "$tmp" ;;
     esac
   done < "$base"
@@ -112,24 +126,29 @@ prepare_ks() {
   fi
   # Refresh last, AFTER identity/hash/source edits. This also upgrades old
   # embedded Kickstarts and replaces (rather than duplicates) a newer repair.
-  if ! python3 "$SCRIPT_DIR/menu_lab.py" postinstall --source "$tmp" --out "$base" \
-      --username "$username" --version "$version"; then
-    rm -f -- "$base" "$tmp"
-    die "Unable to finalize private Kickstart for $name"
+  if [[ $version != 7 ]]; then
+    if ! python3 "$SCRIPT_DIR/menu_lab.py" postinstall --source "$tmp" --out "$base" \
+        --username "$username" --version "$version"; then
+      rm -f -- "$base" "$tmp"
+      die "Unable to finalize private Kickstart for $name"
+    fi
+    mv -f -- "$base" "$tmp"
   fi
-  mv -f -- "$base" "$tmp"
+  rm -f -- "$base"
   chmod 600 -- "$tmp"
   mv -f -- "$tmp" "$out"
   printf 'Prepared private Kickstart: %s (hashes only)\n' "$out"
 }
 
 ensure_kernels() {
-  local version=$1 leaf target
-  mkdir -p -- "$KERNEL_DIR/rhel$version"
+  local version=$1 leaf target installer_iso prefix kernel_dir
+  installer_iso=$ISO prefix="/rhel$version" kernel_dir=$KERNEL_DIR
+  if [[ $version == 7 ]]; then installer_iso=$RHEL7_ISO; prefix='/images/pxeboot'; kernel_dir=$RHEL7_KERNEL_DIR; fi
+  mkdir -p -- "$kernel_dir/rhel$version"
   for leaf in vmlinuz initrd.img; do
-    target="$KERNEL_DIR/rhel$version/$leaf"
+    target="$kernel_dir/rhel$version/$leaf"
     if [[ ! -s $target ]]; then
-      xorriso -osirrox on -indev "$ISO" -extract "/rhel$version/$leaf" "$target" >/dev/null 2>&1 ||
+      xorriso -osirrox on -indev "$installer_iso" -extract "$prefix/$leaf" "$target" >/dev/null 2>&1 ||
         die "Cannot extract RHEL $version installer $leaf from $ISO"
       chmod 644 -- "$target"
     fi
@@ -141,21 +160,25 @@ virt_command() {
   lookup_node "$name"
   memory=6144 cpus=2
   [[ $role != node2 ]] || { memory=8192; cpus=4; }
-  if [[ $version == 10 ]]; then
+  if [[ $version == 7 ]]; then
+    source='inst.repo=cdrom inst.stage2=hd:LABEL=RHEL-7.9\\x20Server.x86_64'
+  elif [[ $version == 10 ]]; then
     source="inst.repo=cdrom inst.stage2=hd:LABEL=$LABEL"
   else
     source="inst.repo=$HOST_REPO/rhel$version inst.stage2=$HOST_REPO/rhel$version"
   fi
   local os_release
-  case $version in 8) os_release=8.10 ;; 9) os_release=9.8 ;; 10) os_release=10.2 ;; esac
+  case $version in 7) os_release=7.9 ;; 8) os_release=8.10 ;; 9) os_release=9.8 ;; 10) os_release=10.2 ;; esac
+  local media=$ISO kernel_dir=$KERNEL_DIR firmware=uefi
+  if [[ $version == 7 ]]; then media=$RHEL7_ISO; kernel_dir=$RHEL7_KERNEL_DIR; firmware=hd; fi
   local args="ip=dhcp $source inst.ks=file:/$name.ks fips=1 lab.ip=$ip lab.hostname=$name.lab.test"
   cmd=("${VIRT_INSTALL[@]}" --connect qemu:///system --name "$name"
        --memory "$memory" --vcpus "$cpus"
        --disk "path=$disk,size=64,format=qcow2,bus=virtio"
-       --disk "path=$ISO,device=cdrom,readonly=on"
+       --disk "path=$media,device=cdrom,readonly=on"
        --network network=stig-lab,model=virtio --graphics spice
-       --osinfo "rhel$os_release" --boot uefi
-       --install "kernel=$KERNEL_DIR/rhel$version/vmlinuz,initrd=$KERNEL_DIR/rhel$version/initrd.img,kernel_args=$args"
+       --osinfo "rhel$os_release" --boot "$firmware"
+       --install "kernel=$kernel_dir/rhel$version/vmlinuz,initrd=$kernel_dir/rhel$version/initrd.img,kernel_args=$args"
        --initrd-inject "$ks" --noautoconsole --wait 0)
 }
 
@@ -180,7 +203,14 @@ main() {
     done
   fi
   if [[ $action == up || $action == prepare ]]; then
-    [[ -r $ISO ]] || die "ISO not readable: $ISO"
+    for name in "${selected[@]}"; do
+      lookup_node "$name"
+      if [[ $version == 7 ]]; then
+        [[ -r $RHEL7_ISO && -s $RHEL7_KEY ]] || die "RHEL 7 DVD or public key not readable: $RHEL7_ISO / $RHEL7_KEY"
+      else
+        [[ -r $ISO ]] || die "ISO not readable: $ISO"
+      fi
+    done
     read_env_file
   fi
   if [[ $action == start || $action == stop ]]; then
@@ -196,7 +226,7 @@ main() {
       [[ $(virsh -c qemu:///system net-info stig-lab | awk '/^Active:/{print $2}') == yes ]] || die 'stig-lab network is inactive'
       for name in "${selected[@]}"; do
         lookup_node "$name"
-        if [[ $version != 10 ]] && ! curl -fsI --max-time 5 "$HOST_REPO/rhel$version/.treeinfo" >/dev/null; then
+        if [[ $version != 10 && $version != 7 ]] && ! curl -fsI --max-time 5 "$HOST_REPO/rhel$version/.treeinfo" >/dev/null; then
           die "RHEL $version repository is unavailable on the lab bridge"
         fi
       done
